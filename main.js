@@ -1,0 +1,829 @@
+// GenAI Finance course, starter scaffold.
+// This file intentionally does very little. Build on it during class.
+//
+// No API keys are stored in this file. Both the Twelve Data key and the
+// OpenRouter key are entered in the form fields at run time, so nothing secret
+// is ever committed to your public repo or shipped in the source.
+
+import * as echarts from 'echarts';
+
+const form = document.getElementById('ticker-form');
+const results = document.getElementById('results');
+
+let currentChart = null;
+let currentResizeObserver = null;
+
+form.addEventListener('submit', async (event) => {
+  event.preventDefault();
+
+  const ticker = document.getElementById('ticker').value.trim().toUpperCase();
+  const twelveDataKey = document.getElementById('twelvedata-key').value.trim();
+  const openRouterKey = document.getElementById('openrouter-key').value.trim();
+
+  // Clean up previous chart if active
+  if (currentChart) {
+    currentChart.dispose();
+    currentChart = null;
+  }
+  if (currentResizeObserver) {
+    currentResizeObserver.disconnect();
+    currentResizeObserver = null;
+  }
+
+  results.innerHTML = '<p class="placeholder">Fetching market data & candlestick history...</p>';
+
+  try {
+    const rawPriceData = await fetchPriceData(ticker, twelveDataKey);
+    const priceData = calculateIndicators(rawPriceData);
+
+    let note = null;
+    if (openRouterKey) {
+      try {
+        note = await getResearchNote(ticker, priceData, openRouterKey);
+      } catch (err) {
+        note = `AI Note unavailable: ${err.message}`;
+      }
+    }
+    renderResults(ticker, priceData, note);
+  } catch (err) {
+    results.innerHTML = `<p class="error">Something went wrong: ${err.message}</p>`;
+  }
+});
+
+// Twelve Data daily price history.
+// Fetch outputsize=300 (~1.2 years) for rich candlestick chart history.
+async function fetchPriceData(ticker, apiKey) {
+  const url = `https://api.twelvedata.com/time_series?symbol=${ticker}&interval=1day&outputsize=300&apikey=${apiKey}`;
+  const response = await fetch(url);
+
+  const body = await response.text();
+  let raw;
+  try {
+    raw = JSON.parse(body);
+  } catch {
+    throw new Error(body.trim() || 'Price fetch failed');
+  }
+
+  if (raw && raw.status === 'error') throw new Error(raw.message || 'Price fetch failed');
+  if (!response.ok) throw new Error('Price fetch failed');
+
+  const values = raw.values ?? [];
+  if (!values.length) throw new Error(`No price data returned for ${ticker}`);
+
+  return values
+    .map((b) => ({
+      date: b.datetime,
+      open: Number(b.open),
+      high: Number(b.high),
+      low: Number(b.low),
+      close: Number(b.close),
+      volume: Number(b.volume || 0)
+    }))
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
+}
+
+/**
+ * Calculates MACD (12, 26, 9) and RSI (14) for the price series.
+ * Returns array enriched with macd, signal, histogram, and rsi.
+ */
+function calculateIndicators(priceData) {
+  const closes = priceData.map((d) => d.close);
+  const len = closes.length;
+
+  function calculateEMA(data, period) {
+    const k = 2 / (period + 1);
+    const ema = new Array(data.length).fill(null);
+    if (data.length < period) return ema;
+
+    let sum = 0;
+    for (let i = 0; i < period; i++) sum += data[i];
+    let prevEMA = sum / period;
+    ema[period - 1] = prevEMA;
+
+    for (let i = period; i < data.length; i++) {
+      const currentEMA = data[i] * k + prevEMA * (1 - k);
+      ema[i] = currentEMA;
+      prevEMA = currentEMA;
+    }
+    return ema;
+  }
+
+  const ema12 = calculateEMA(closes, 12);
+  const ema26 = calculateEMA(closes, 26);
+
+  const macdLine = new Array(len).fill(null);
+  const macdValList = [];
+  const macdIdxList = [];
+
+  for (let i = 0; i < len; i++) {
+    if (ema12[i] !== null && ema26[i] !== null) {
+      const val = ema12[i] - ema26[i];
+      macdLine[i] = val;
+      macdValList.push(val);
+      macdIdxList.push(i);
+    }
+  }
+
+  const signalEMA = calculateEMA(macdValList, 9);
+  const signalLine = new Array(len).fill(null);
+  const histogram = new Array(len).fill(null);
+
+  for (let idx = 0; idx < macdValList.length; idx++) {
+    const origIndex = macdIdxList[idx];
+    if (signalEMA[idx] !== null) {
+      signalLine[origIndex] = signalEMA[idx];
+      histogram[origIndex] = macdLine[origIndex] - signalEMA[idx];
+    }
+  }
+
+  // RSI 14 calculation (Wilder's Smoothing)
+  const rsi = new Array(len).fill(null);
+  const periodRSI = 14;
+
+  if (len > periodRSI) {
+    let gains = 0;
+    let losses = 0;
+
+    for (let i = 1; i <= periodRSI; i++) {
+      const diff = closes[i] - closes[i - 1];
+      if (diff >= 0) gains += diff;
+      else losses += Math.abs(diff);
+    }
+
+    let avgGain = gains / periodRSI;
+    let avgLoss = losses / periodRSI;
+
+    if (avgLoss === 0) {
+      rsi[periodRSI] = 100;
+    } else {
+      const rs = avgGain / avgLoss;
+      rsi[periodRSI] = 100 - 100 / (1 + rs);
+    }
+
+    for (let i = periodRSI + 1; i < len; i++) {
+      const diff = closes[i] - closes[i - 1];
+      const currentGain = diff > 0 ? diff : 0;
+      const currentLoss = diff < 0 ? Math.abs(diff) : 0;
+
+      avgGain = (avgGain * (periodRSI - 1) + currentGain) / periodRSI;
+      avgLoss = (avgLoss * (periodRSI - 1) + currentLoss) / periodRSI;
+
+      if (avgLoss === 0) {
+        rsi[i] = 100;
+      } else {
+        const rs = avgGain / avgLoss;
+        rsi[i] = 100 - 100 / (1 + rs);
+      }
+    }
+  }
+
+  return priceData.map((d, i) => ({
+    ...d,
+    macd: macdLine[i],
+    signal: signalLine[i],
+    histogram: histogram[i],
+    rsi: rsi[i],
+  }));
+}
+
+// Helper to format basic markdown (bold, italic, list items, paragraphs) into clean HTML
+function formatMarkdownOrText(text) {
+  if (!text) return '';
+  let html = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+
+  const lines = html.split('\n');
+  let result = '';
+  let inList = false;
+
+  for (let line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+      if (!inList) {
+        result += '<ul>';
+        inList = true;
+      }
+      result += `<li>${trimmed.substring(2)}</li>`;
+    } else {
+      if (inList) {
+        result += '</ul>';
+        inList = false;
+      }
+      if (trimmed) {
+        result += `<p>${trimmed}</p>`;
+      }
+    }
+  }
+  if (inList) {
+    result += '</ul>';
+  }
+  return result;
+}
+
+// OpenRouter call. The price data and technical indicators are summarized and handed to the model
+// so the research note reflects the actual numbers fetched and calculated.
+async function getResearchNote(ticker, priceData, apiKey) {
+  const first = priceData[0];
+  const latest = priceData[priceData.length - 1];
+  const previous = priceData.length > 1 ? priceData[priceData.length - 2] : null;
+
+  const pctChange = ((latest.close - first.close) / first.close) * 100;
+  const dayChange = previous ? latest.close - previous.close : latest.close - latest.open;
+  const dayPct = previous ? (dayChange / previous.close) * 100 : ((latest.close - latest.open) / latest.open) * 100;
+
+  const rsiVal = latest.rsi !== null ? latest.rsi.toFixed(2) : 'N/A';
+  const macdVal = latest.macd !== null ? latest.macd.toFixed(2) : 'N/A';
+  const signalVal = latest.signal !== null ? latest.signal.toFixed(2) : 'N/A';
+  const histVal = latest.histogram !== null ? latest.histogram.toFixed(2) : 'N/A';
+
+  const summary = `
+Financial & Technical Market Data for ${ticker}:
+- Date Range Analyzed: ${first.date} to ${latest.date} (${priceData.length} trading days)
+- Overall Range Performance: Start $${first.close.toFixed(2)} -> Latest $${latest.close.toFixed(2)} (${pctChange >= 0 ? '+' : ''}${pctChange.toFixed(2)}%)
+- Latest Session (${latest.date}):
+  * Open: $${latest.open.toFixed(2)}
+  * High: $${latest.high.toFixed(2)}
+  * Low: $${latest.low.toFixed(2)}
+  * Close: $${latest.close.toFixed(2)}
+  * Single-day Change: ${dayChange >= 0 ? '+' : ''}$${dayChange.toFixed(2)} (${dayPct >= 0 ? '+' : ''}${dayPct.toFixed(2)}%)
+  * Volume: ${latest.volume ? latest.volume.toLocaleString() : 'N/A'}
+- Technical Indicators (Calculated for Latest Session):
+  * Relative Strength Index (RSI 14): ${rsiVal} (${latest.rsi !== null ? (latest.rsi >= 70 ? 'Overbought signal > 70' : latest.rsi <= 30 ? 'Oversold signal < 30' : 'Neutral territory 30-70') : 'N/A'})
+  * MACD Line (12,26): ${macdVal}
+  * MACD Signal Line (9): ${signalVal}
+  * MACD Histogram: ${histVal} (${latest.histogram !== null ? (latest.histogram >= 0 ? 'Bullish momentum (histogram >= 0)' : 'Bearish momentum (histogram < 0)') : 'N/A'})
+  `;
+
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: 'openai/gpt-4o-mini',
+      max_tokens: 1000,
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a professional financial research analyst. Write a concise, insightful research note analyzing the provided ticker data. Synthesize price trends, single-day session action, RSI levels, and MACD momentum signals into actionable insights.'
+        },
+        {
+          role: 'user',
+          content: `${summary}\n\nWrite a two-paragraph AI Research Note for ${ticker} based on this dataset.`
+        }
+      ]
+    })
+  });
+
+  if (!response.ok) throw new Error(`OpenRouter call failed. ${await readOpenRouterError(response)}`);
+  const data = await response.json();
+  return data.choices?.[0]?.message?.content ?? 'No response returned from model.';
+}
+
+// Pulls the useful part out of an OpenRouter error response: the HTTP status,
+// a plain-language hint for the common cases, and the message OpenRouter (or
+// the upstream provider) actually returned.
+async function readOpenRouterError(response) {
+  let message = '';
+  try {
+    const body = await response.json();
+    const err = body.error ?? body;
+    message = err.message || '';
+    const provider = err.metadata?.provider_name;
+    const raw = err.metadata?.raw;
+    if (provider) message += ` [provider: ${provider}]`;
+    if (raw) message += ` ${typeof raw === 'string' ? raw : JSON.stringify(raw)}`;
+  } catch {
+    // Response body was not JSON
+  }
+  const hint = {
+    401: 'Your API key looks invalid or missing',
+    402: 'This model is paid and your OpenRouter account is out of credits',
+    429: 'Rate limited, wait a moment and try again'
+  }[response.status];
+  return [`(HTTP ${response.status})`, hint, message].filter(Boolean).join(' ');
+}
+
+function renderResults(ticker, priceData, note) {
+  const latest = priceData[priceData.length - 1];
+  const previous = priceData.length > 1 ? priceData[priceData.length - 2] : null;
+
+  const dollarChange = previous ? latest.close - previous.close : latest.close - latest.open;
+  const percentChange = previous ? (dollarChange / previous.close) * 100 : ((latest.close - latest.open) / latest.open) * 100;
+  const isPositive = dollarChange >= 0;
+  const changeClass = isPositive ? 'pos' : 'neg';
+  const changeSign = isPositive ? '+' : '';
+
+  const minDate = priceData[0].date;
+  const maxDate = priceData[priceData.length - 1].date;
+
+  const recentHistory = [...priceData].reverse().slice(0, 15);
+
+  const historyRows = recentHistory.map((bar, idx) => {
+    const prevBar = recentHistory[idx + 1];
+    let rowChange = 0;
+    let rowPct = 0;
+    if (prevBar) {
+      rowChange = bar.close - prevBar.close;
+      rowPct = (rowChange / prevBar.close) * 100;
+    } else {
+      rowChange = bar.close - bar.open;
+      rowPct = (rowChange / bar.open) * 100;
+    }
+    const rowClass = rowChange >= 0 ? 'pos' : 'neg';
+    const rowSign = rowChange >= 0 ? '+' : '';
+
+    return `
+      <tr>
+        <td class="col-date">${bar.date}</td>
+        <td class="col-num">$${bar.open.toFixed(2)}</td>
+        <td class="col-num">$${bar.high.toFixed(2)}</td>
+        <td class="col-num">$${bar.low.toFixed(2)}</td>
+        <td class="col-num"><strong>$${bar.close.toFixed(2)}</strong></td>
+        <td class="col-num ${rowClass}">${rowSign}$${rowChange.toFixed(2)} (${rowSign}${rowPct.toFixed(2)}%)</td>
+        <td class="col-num">${bar.volume ? bar.volume.toLocaleString() : 'N/A'}</td>
+        <td class="col-num">${bar.rsi !== null ? bar.rsi.toFixed(1) : '-'}</td>
+        <td class="col-num">${bar.macd !== null ? bar.macd.toFixed(2) : '-'}</td>
+      </tr>
+    `;
+  }).join('');
+
+  results.innerHTML = `
+    <div class="result-header">
+      <h2>${ticker} OHLC & Indicator Analysis</h2>
+      <span class="latest-date">Latest Session: ${latest.date}</span>
+    </div>
+
+    <div class="ohlc-hero">
+      <div class="hero-price">
+        <span class="label">Latest Close</span>
+        <span class="value">$${latest.close.toFixed(2)}</span>
+      </div>
+      <div class="hero-change ${changeClass}">
+        <span class="label">Day Change</span>
+        <span class="value">${changeSign}$${dollarChange.toFixed(2)} (${changeSign}${percentChange.toFixed(2)}%)</span>
+      </div>
+    </div>
+
+    <div class="chart-section">
+      <div class="chart-header">
+        <h3>Interactive Candlestick, MACD & RSI Charts</h3>
+        <div class="date-range-bar">
+          <div class="preset-buttons">
+            <button type="button" class="range-btn" data-range="1M">1M</button>
+            <button type="button" class="range-btn active" data-range="3M">3M</button>
+            <button type="button" class="range-btn" data-range="6M">6M</button>
+            <button type="button" class="range-btn" data-range="1Y">1Y</button>
+            <button type="button" class="range-btn" data-range="YTD">YTD</button>
+            <button type="button" class="range-btn" data-range="ALL">ALL</button>
+          </div>
+          <div class="custom-date-picker">
+            <label for="start-date-input">From:</label>
+            <input type="date" id="start-date-input" min="${minDate}" max="${maxDate}">
+            <label for="end-date-input">To:</label>
+            <input type="date" id="end-date-input" min="${minDate}" max="${maxDate}">
+            <button type="button" id="apply-custom-dates">Set</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="chart-legend" class="chart-legend"></div>
+      <div id="candlestick-chart-container" class="candlestick-chart-container"></div>
+    </div>
+
+    <div class="ohlc-grid">
+      <div class="metric-card">
+        <span class="metric-label">Open</span>
+        <span class="metric-value">$${latest.open.toFixed(2)}</span>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">High</span>
+        <span class="metric-value">$${latest.high.toFixed(2)}</span>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">Low</span>
+        <span class="metric-value">$${latest.low.toFixed(2)}</span>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">Close</span>
+        <span class="metric-value">$${latest.close.toFixed(2)}</span>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">Volume</span>
+        <span class="metric-value">${latest.volume ? latest.volume.toLocaleString() : 'N/A'}</span>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">RSI (14)</span>
+        <span class="metric-value ${latest.rsi !== null ? (latest.rsi >= 70 ? 'neg' : latest.rsi <= 30 ? 'pos' : '') : ''}">${latest.rsi !== null ? latest.rsi.toFixed(2) : 'N/A'}</span>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">MACD Line</span>
+        <span class="metric-value ${latest.macd !== null ? (latest.macd >= 0 ? 'pos' : 'neg') : ''}">${latest.macd !== null ? latest.macd.toFixed(2) : 'N/A'}</span>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">MACD Signal</span>
+        <span class="metric-value">${latest.signal !== null ? latest.signal.toFixed(2) : 'N/A'}</span>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">MACD Hist</span>
+        <span class="metric-value ${latest.histogram !== null ? (latest.histogram >= 0 ? 'pos' : 'neg') : ''}">${latest.histogram !== null ? latest.histogram.toFixed(2) : 'N/A'}</span>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">Session Range</span>
+        <span class="metric-value">$${latest.low.toFixed(2)} - $${latest.high.toFixed(2)}</span>
+      </div>
+    </div>
+
+    <div class="history-section">
+      <h3>Recent Daily OHLC History</h3>
+      <div class="table-wrapper">
+        <table class="ohlc-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Open</th>
+              <th>High</th>
+              <th>Low</th>
+              <th>Close</th>
+              <th>Change</th>
+              <th>Volume</th>
+              <th>RSI(14)</th>
+              <th>MACD</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${historyRows}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="note-box">
+      <h3>AI Research Note</h3>
+      ${
+        note
+          ? `<div class="note-body">${formatMarkdownOrText(note)}</div>`
+          : `<p class="note-placeholder"><em>Provide an OpenRouter API Key in the form above to generate an automated AI Research Note analyzing OHLC, MACD, and RSI data.</em></p>`
+      }
+    </div>
+  `;
+
+  initCandlestickChart(priceData);
+}
+
+function initCandlestickChart(priceData) {
+  const container = document.getElementById('candlestick-chart-container');
+  const legendEl = document.getElementById('chart-legend');
+  const startDateInput = document.getElementById('start-date-input');
+  const endDateInput = document.getElementById('end-date-input');
+  const applyBtn = document.getElementById('apply-custom-dates');
+  const presetBtns = document.querySelectorAll('.range-btn');
+
+  if (!container) return;
+
+  const dates = priceData.map((d) => d.date);
+  const ohlcData = priceData.map((d) => [d.open, d.close, d.low, d.high]);
+  const volumeData = priceData.map((d) => ({
+    value: d.volume,
+    itemStyle: {
+      color: d.close >= d.open ? 'rgba(27, 122, 58, 0.5)' : 'rgba(166, 48, 44, 0.5)',
+    },
+  }));
+
+  const macdLineData = priceData.map((d) => (d.macd !== null ? Number(d.macd.toFixed(3)) : null));
+  const signalLineData = priceData.map((d) => (d.signal !== null ? Number(d.signal.toFixed(3)) : null));
+  const histData = priceData.map((d) => ({
+    value: d.histogram !== null ? Number(d.histogram.toFixed(3)) : null,
+    itemStyle: {
+      color: d.histogram !== null && d.histogram >= 0 ? '#1b7a3a' : '#a6302c',
+    },
+  }));
+  const rsiData = priceData.map((d) => (d.rsi !== null ? Number(d.rsi.toFixed(2)) : null));
+
+  const chart = echarts.init(container);
+  currentChart = chart;
+
+  const latestBar = priceData[priceData.length - 1];
+  updateLegend(latestBar);
+
+  const option = {
+    animation: false,
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: {
+        type: 'cross',
+        lineStyle: {
+          color: '#8a8577',
+          width: 1,
+          type: 'dashed',
+        },
+      },
+      backgroundColor: 'rgba(255, 255, 255, 0.95)',
+      borderColor: '#dcd7cc',
+      textStyle: {
+        color: '#333',
+        fontFamily: "'Menlo', 'Courier New', monospace",
+        fontSize: 12,
+      },
+      formatter: function (params) {
+        if (!params || !params.length) return '';
+        const dataIndex = params[0].dataIndex;
+        const bar = priceData[dataIndex];
+        if (bar) {
+          updateLegend(bar);
+        }
+        return '';
+      },
+    },
+    grid: [
+      { left: '8%', right: '4%', top: '4%', height: '38%' },
+      { left: '8%', right: '4%', top: '46%', height: '10%' },
+      { left: '8%', right: '4%', top: '60%', height: '14%' },
+      { left: '8%', right: '4%', top: '78%', height: '12%' },
+    ],
+    xAxis: [
+      {
+        type: 'category',
+        data: dates,
+        boundaryGap: true,
+        axisLine: { lineStyle: { color: '#dcd7cc' } },
+        axisLabel: { show: false },
+        splitLine: { show: true, lineStyle: { color: '#f2eee6' } },
+      },
+      {
+        type: 'category',
+        gridIndex: 1,
+        data: dates,
+        boundaryGap: true,
+        axisLine: { show: false },
+        axisLabel: { show: false },
+        splitLine: { show: false },
+      },
+      {
+        type: 'category',
+        gridIndex: 2,
+        data: dates,
+        boundaryGap: true,
+        axisLine: { lineStyle: { color: '#dcd7cc' } },
+        axisLabel: { show: false },
+        splitLine: { show: true, lineStyle: { color: '#f2eee6' } },
+      },
+      {
+        type: 'category',
+        gridIndex: 3,
+        data: dates,
+        boundaryGap: true,
+        axisLine: { lineStyle: { color: '#dcd7cc' } },
+        axisLabel: {
+          color: '#555',
+          fontFamily: "'Menlo', 'Courier New', monospace",
+          fontSize: 10,
+        },
+        splitLine: { show: true, lineStyle: { color: '#f2eee6' } },
+      },
+    ],
+    yAxis: [
+      {
+        scale: true,
+        axisLine: { lineStyle: { color: '#dcd7cc' } },
+        axisLabel: {
+          color: '#555',
+          fontFamily: "'Menlo', 'Courier New', monospace",
+          fontSize: 10,
+          formatter: (v) => '$' + v.toFixed(2),
+        },
+        splitLine: { show: true, lineStyle: { color: '#f2eee6' } },
+      },
+      {
+        scale: true,
+        gridIndex: 1,
+        splitNumber: 2,
+        axisLine: { show: false },
+        axisLabel: { show: false },
+        splitLine: { show: false },
+      },
+      {
+        scale: true,
+        gridIndex: 2,
+        axisLine: { lineStyle: { color: '#dcd7cc' } },
+        axisLabel: {
+          color: '#555',
+          fontFamily: "'Menlo', 'Courier New', monospace",
+          fontSize: 9,
+        },
+        splitLine: { show: true, lineStyle: { color: '#f2eee6' } },
+      },
+      {
+        min: 0,
+        max: 100,
+        gridIndex: 3,
+        axisLine: { lineStyle: { color: '#dcd7cc' } },
+        axisLabel: {
+          color: '#555',
+          fontFamily: "'Menlo', 'Courier New', monospace",
+          fontSize: 9,
+        },
+        splitLine: { show: true, lineStyle: { color: '#f2eee6' } },
+      },
+    ],
+    dataZoom: [
+      {
+        type: 'inside',
+        xAxisIndex: [0, 1, 2, 3],
+        start: 70,
+        end: 100,
+      },
+      {
+        show: true,
+        type: 'slider',
+        xAxisIndex: [0, 1, 2, 3],
+        top: '94%',
+        height: 18,
+        start: 70,
+        end: 100,
+        borderColor: '#dcd7cc',
+        fillerColor: 'rgba(27, 122, 58, 0.15)',
+        handleStyle: { color: '#1b7a3a' },
+        textStyle: { color: '#6b675d', fontFamily: "'Menlo', 'Courier New', monospace", fontSize: 10 },
+      },
+    ],
+    series: [
+      {
+        name: 'Candlestick',
+        type: 'candlestick',
+        data: ohlcData,
+        itemStyle: {
+          color: '#1b7a3a',
+          color0: '#a6302c',
+          borderColor: '#1b7a3a',
+          borderColor0: '#a6302c',
+        },
+      },
+      {
+        name: 'Volume',
+        type: 'bar',
+        xAxisIndex: 1,
+        yAxisIndex: 1,
+        data: volumeData,
+      },
+      {
+        name: 'MACD',
+        type: 'line',
+        xAxisIndex: 2,
+        yAxisIndex: 2,
+        data: macdLineData,
+        showSymbol: false,
+        lineStyle: { color: '#2563eb', width: 1.5 },
+      },
+      {
+        name: 'Signal',
+        type: 'line',
+        xAxisIndex: 2,
+        yAxisIndex: 2,
+        data: signalLineData,
+        showSymbol: false,
+        lineStyle: { color: '#d97706', width: 1.5 },
+      },
+      {
+        name: 'Histogram',
+        type: 'bar',
+        xAxisIndex: 2,
+        yAxisIndex: 2,
+        data: histData,
+      },
+      {
+        name: 'RSI',
+        type: 'line',
+        xAxisIndex: 3,
+        yAxisIndex: 3,
+        data: rsiData,
+        showSymbol: false,
+        lineStyle: { color: '#7c3aed', width: 1.5 },
+        markLine: {
+          symbol: 'none',
+          data: [
+            { yAxis: 70, lineStyle: { color: '#a6302c', type: 'dashed' } },
+            { yAxis: 30, lineStyle: { color: '#1b7a3a', type: 'dashed' } },
+          ],
+        },
+      },
+    ],
+  };
+
+  chart.setOption(option);
+
+  function updateLegend(bar) {
+    const change = bar.close - bar.open;
+    const pct = bar.open > 0 ? (change / bar.open) * 100 : 0;
+    const sign = change >= 0 ? '+' : '';
+    const cls = change >= 0 ? 'pos' : 'neg';
+
+    const rsiTxt = bar.rsi !== null ? bar.rsi.toFixed(1) : 'N/A';
+    const macdTxt = bar.macd !== null ? bar.macd.toFixed(2) : 'N/A';
+    const sigTxt = bar.signal !== null ? bar.signal.toFixed(2) : 'N/A';
+
+    legendEl.innerHTML = `
+      <span class="legend-item"><strong>Date:</strong> ${bar.date}</span>
+      <span class="legend-item"><strong>O:</strong> $${bar.open.toFixed(2)}</span>
+      <span class="legend-item"><strong>H:</strong> $${bar.high.toFixed(2)}</span>
+      <span class="legend-item"><strong>L:</strong> $${bar.low.toFixed(2)}</span>
+      <span class="legend-item"><strong>C:</strong> $${bar.close.toFixed(2)}</span>
+      <span class="legend-item ${cls}"><strong>Chg:</strong> ${sign}$${change.toFixed(2)} (${sign}${pct.toFixed(2)}%)</span>
+      <span class="legend-item"><strong>RSI:</strong> ${rsiTxt}</span>
+      <span class="legend-item"><strong>MACD:</strong> ${macdTxt}</span>
+      <span class="legend-item"><strong>Sig:</strong> ${sigTxt}</span>
+    `;
+  }
+
+  function applyPresetRange(rangeKey) {
+    const maxBar = priceData[priceData.length - 1];
+    const latestDate = new Date(maxBar.date);
+    let targetStartDate = new Date(latestDate);
+
+    if (rangeKey === '1M') {
+      targetStartDate.setMonth(targetStartDate.getMonth() - 1);
+    } else if (rangeKey === '3M') {
+      targetStartDate.setMonth(targetStartDate.getMonth() - 3);
+    } else if (rangeKey === '6M') {
+      targetStartDate.setMonth(targetStartDate.getMonth() - 6);
+    } else if (rangeKey === '1Y') {
+      targetStartDate.setFullYear(targetStartDate.getFullYear() - 1);
+    } else if (rangeKey === 'YTD') {
+      targetStartDate = new Date(latestDate.getFullYear(), 0, 1);
+    } else if (rangeKey === 'ALL') {
+      chart.dispatchAction({
+        type: 'dataZoom',
+        start: 0,
+        end: 100,
+      });
+      return;
+    }
+
+    const startDateStr = targetStartDate.toISOString().split('T')[0];
+    let startIdx = priceData.findIndex((d) => d.date >= startDateStr);
+    if (startIdx < 0) startIdx = 0;
+
+    chart.dispatchAction({
+      type: 'dataZoom',
+      startValue: startIdx,
+      endValue: priceData.length - 1,
+    });
+  }
+
+  // Set initial preset to 3M
+  applyPresetRange('3M');
+
+  presetBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      presetBtns.forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      applyPresetRange(btn.dataset.range);
+    });
+  });
+
+  applyBtn.addEventListener('click', () => {
+    const sDate = startDateInput.value;
+    const eDate = endDateInput.value;
+    if (sDate && eDate) {
+      let startIdx = priceData.findIndex((d) => d.date >= sDate);
+      let endIdx = priceData.length - 1;
+      for (let i = priceData.length - 1; i >= 0; i--) {
+        if (priceData[i].date <= eDate) {
+          endIdx = i;
+          break;
+        }
+      }
+      if (startIdx >= 0 && endIdx >= startIdx) {
+        chart.dispatchAction({
+          type: 'dataZoom',
+          startValue: startIdx,
+          endValue: endIdx,
+        });
+        presetBtns.forEach((b) => b.classList.remove('active'));
+      }
+    }
+  });
+
+  chart.on('dataZoom', () => {
+    const opt = chart.getOption();
+    if (opt && opt.dataZoom && opt.dataZoom[0]) {
+      const dz = opt.dataZoom[0];
+      const startIdx = typeof dz.startValue !== 'undefined' ? dz.startValue : Math.floor((dz.start / 100) * (priceData.length - 1));
+      const endIdx = typeof dz.endValue !== 'undefined' ? dz.endValue : Math.ceil((dz.end / 100) * (priceData.length - 1));
+
+      if (priceData[startIdx]) startDateInput.value = priceData[startIdx].date;
+      if (priceData[endIdx]) endDateInput.value = priceData[endIdx].date;
+    }
+  });
+
+  currentResizeObserver = new ResizeObserver(() => {
+    chart.resize();
+  });
+  currentResizeObserver.observe(container);
+}

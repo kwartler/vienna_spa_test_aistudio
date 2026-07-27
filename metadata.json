@@ -1,0 +1,8 @@
+{
+  "name": "GenAI Finance App",
+  "description": "Financial research and stock price analysis tool with Twelve Data and OpenRouter integration",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
