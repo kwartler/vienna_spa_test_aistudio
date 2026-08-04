@@ -822,6 +822,141 @@ button:hover {
   color: var(--ink);
 }
 
+.form-section-divider {
+  margin-top: 1.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px dashed var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.section-title {
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--ink);
+  margin-bottom: 0.1rem;
+}
+
+.transcript-urls-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.transcript-urls-group input {
+  font-size: 0.85rem;
+}
+
+.radio-group-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #4a4a4a;
+  margin-top: 0.25rem;
+}
+
+.radio-group {
+  display: flex;
+  gap: 1.25rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.radio-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.88rem;
+  cursor: pointer;
+  color: var(--ink);
+}
+
+.radio-option input[type="radio"] {
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.secondary-btn {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  padding: 0.6rem 1.1rem;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  align-self: flex-start;
+  margin-top: 0.25rem;
+}
+
+.secondary-btn:hover {
+  background: rgba(0,0,0,0.03);
+  border-color: var(--ink);
+}
+
+.primary-btn {
+  margin-top: 1rem;
+}
+
+.earnings-section {
+  border-left-color: #2563eb;
+  background: #f8fafc;
+}
+
+.earnings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.earnings-header h3 {
+  margin: 0;
+  color: #1e40af;
+}
+
+.sentiment-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: 'Menlo', 'Courier New', monospace;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0.25rem 0.6rem;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sentiment-badge.positive {
+  background: rgba(34, 197, 94, 0.15);
+  color: #15803d;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.sentiment-badge.negative {
+  background: rgba(239, 68, 68, 0.15);
+  color: #b91c1c;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.sentiment-badge.neutral {
+  background: rgba(100, 116, 139, 0.15);
+  color: #475569;
+  border: 1px solid rgba(100, 116, 139, 0.3);
+}
+
+.earnings-meta {
+  font-size: 0.8rem;
+  color: #64748b;
+  margin-bottom: 0.75rem;
+}
+
+.earnings-body {
+  font-size: 0.92rem;
+  line-height: 1.6;
+  color: var(--ink);
+}
+
 .app-footer {
   max-width: 640px;
   margin: 0 auto;

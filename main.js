@@ -7,12 +7,44 @@
 
 import * as echarts from 'echarts';
 import html2pdf from 'html2pdf.js';
+import Papa from 'papaparse';
 
 const form = document.getElementById('ticker-form');
 const results = document.getElementById('results');
 
 let currentChart = null;
 let currentResizeObserver = null;
+let lastEarningsAnalysis = null;
+
+function renderEarningsSectionHtml(earningsAnalysis, ticker = '', isUpdating = false) {
+  if (!earningsAnalysis) {
+    return `
+      <div class="note-box earnings-section" id="earnings-section-card">
+        <div class="earnings-header">
+          <h3>Earnings Call Transcripts Analysis</h3>
+          <span class="sentiment-badge neutral">OPTIONAL</span>
+        </div>
+        <p class="no-risks-message">No earnings call transcripts analyzed. Enter up to 4 CSV URLs in the form above and click "Analyze Earnings Calls" or "Analyze All Data".</p>
+      </div>
+    `;
+  }
+
+  const updatingBadge = isUpdating ? ' <span style="font-size: 0.8rem; font-weight: normal; color: #2563eb; margin-left: 0.5rem;">(Updating...)</span>' : '';
+  const tickerLabel = ticker && ticker !== 'Company' ? ` (${escapeHtml(ticker)})` : '';
+
+  return `
+    <div class="note-box earnings-section" id="earnings-section-card">
+      <div class="earnings-header">
+        <h3>Earnings Call Transcripts Analysis${tickerLabel}${updatingBadge}</h3>
+        <span class="sentiment-badge ${earningsAnalysis.sentiment.toLowerCase()}">${earningsAnalysis.sentiment} SENTIMENT</span>
+      </div>
+      <div class="earnings-meta">
+        Filter Mode: <strong>${escapeHtml(earningsAnalysis.filterMode.toUpperCase())}</strong> | Transcripts Processed: ${earningsAnalysis.urlsProcessed ? earningsAnalysis.urlsProcessed.length : 0}
+      </div>
+      <div class="earnings-body">${formatMarkdownOrText(earningsAnalysis.analysis)}</div>
+    </div>
+  `;
+}
 
 // Cleans API key input by stripping zero-width spaces, leading/trailing whitespace, or pasted surrounding quotes
 function cleanApiKey(key) {
@@ -60,6 +92,24 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 });
 
+// Collect up to 4 transcript URLs entered in form fields
+function getTranscriptUrls() {
+  const urls = [];
+  for (let i = 1; i <= 4; i++) {
+    const el = document.getElementById(`transcript-url-${i}`);
+    if (el && el.value.trim()) {
+      urls.push(el.value.trim());
+    }
+  }
+  return urls;
+}
+
+// Get selected transcript filter option ('all', 'company', or 'analyst')
+function getTranscriptFilterMode() {
+  const selected = document.querySelector('input[name="transcript-filter"]:checked');
+  return selected ? selected.value : 'all';
+}
+
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
 
@@ -67,6 +117,8 @@ form.addEventListener('submit', async (event) => {
   const twelveDataKey = cleanApiKey(document.getElementById('twelvedata-key').value);
   const newsDataKey = cleanApiKey(document.getElementById('newsdata-key')?.value || '');
   const openRouterKey = cleanApiKey(document.getElementById('openrouter-key').value);
+  const transcriptUrls = getTranscriptUrls();
+  const transcriptFilterMode = getTranscriptFilterMode();
 
   // Auto-save keys to localStorage for convenience
   try {
@@ -87,7 +139,25 @@ form.addEventListener('submit', async (event) => {
     currentResizeObserver = null;
   }
 
-  results.innerHTML = '<p class="placeholder">Fetching market data, indicators & headlines...</p>';
+  const existingEarnings = lastEarningsAnalysis;
+  const isUpdatingEarnings = transcriptUrls.length > 0 && Boolean(openRouterKey);
+
+  let earningsHeaderHtml = '';
+  if (existingEarnings) {
+    earningsHeaderHtml = renderEarningsSectionHtml(existingEarnings, ticker, isUpdatingEarnings);
+  } else if (isUpdatingEarnings) {
+    earningsHeaderHtml = `
+      <div class="note-box earnings-section" id="earnings-section-card">
+        <div class="earnings-header">
+          <h3>Earnings Call Transcripts Analysis ${ticker ? `(${escapeHtml(ticker)})` : ''}</h3>
+          <span class="sentiment-badge neutral">ANALYZING...</span>
+        </div>
+        <p class="no-risks-message">Analyzing earnings call transcripts in parallel...</p>
+      </div>
+    `;
+  }
+
+  results.innerHTML = `${earningsHeaderHtml}<p class="placeholder">Fetching market data, indicators & headlines...</p>`;
 
   try {
     const { priceData: rawPriceData, companyName } = await fetchPriceData(ticker, twelveDataKey);
@@ -109,30 +179,40 @@ form.addEventListener('submit', async (event) => {
     let note = null;
     let perplexityAnalysis = null;
     let riskAnalysis = { hasRisks: false, riskSummary: null };
+    let earningsAnalysis = null;
 
     if (openRouterKey) {
-      // Step 1: Run Perplexity Sonar web search analysis & Flash-Lite risk check in parallel
-      const [perpResult, riskResult] = await Promise.all([
+      // Step 1: Run Perplexity Sonar web search, Flash-Lite risk check, and Earnings Call Transcript Analysis in parallel
+      const [perpResult, riskResult, earningsResult] = await Promise.all([
         (newsHeadlines && newsHeadlines.length > 0)
           ? getPerplexityNewsAnalysis(ticker, newsHeadlines, openRouterKey, companyName).catch(err => `Perplexity Analysis unavailable: ${err.message}`)
           : Promise.resolve(null),
         risklineAlerts
           ? checkCompanyRisksWithFlashLite(ticker, companyName, risklineAlerts, openRouterKey)
-          : Promise.resolve({ hasRisks: false, riskSummary: null })
+          : Promise.resolve({ hasRisks: false, riskSummary: null }),
+        (transcriptUrls.length > 0)
+          ? analyzeEarningsTranscripts(transcriptUrls, transcriptFilterMode, openRouterKey, ticker)
+          : Promise.resolve(null)
       ]);
 
       perplexityAnalysis = perpResult;
       riskAnalysis = riskResult || { hasRisks: false, riskSummary: null };
+      if (earningsResult) {
+        lastEarningsAnalysis = earningsResult;
+        earningsAnalysis = earningsResult;
+      } else {
+        earningsAnalysis = lastEarningsAnalysis;
+      }
 
-      // Step 2: Pass stock data, indicators, news, Perplexity SWOT, and Riskline risks into getResearchNote
+      // Step 2: Pass stock data, indicators, news, Perplexity SWOT, Riskline risks, and Earnings Call sentiment into getResearchNote
       try {
-        note = await getResearchNote(ticker, priceData, openRouterKey, newsHeadlines, companyName, perplexityAnalysis, riskAnalysis);
+        note = await getResearchNote(ticker, priceData, openRouterKey, newsHeadlines, companyName, perplexityAnalysis, riskAnalysis, earningsAnalysis);
       } catch (err) {
         note = `AI Note unavailable: ${err.message}`;
       }
     }
 
-    renderResults(ticker, priceData, note, newsHeadlines, newsError, companyName, perplexityAnalysis, riskAnalysis);
+    renderResults(ticker, priceData, note, newsHeadlines, newsError, companyName, perplexityAnalysis, riskAnalysis, earningsAnalysis);
   } catch (err) {
     results.innerHTML = `<p class="error">Something went wrong: ${err.message}</p>`;
   }
@@ -387,7 +467,7 @@ function formatMarkdownOrText(text) {
 
 // OpenRouter call. The price data and technical indicators are summarized and handed to the model
 // so the research note reflects the actual numbers fetched and calculated.
-async function getResearchNote(ticker, priceData, apiKey, newsHeadlines = null, companyName = '', perplexityAnalysis = null, riskAnalysis = null) {
+async function getResearchNote(ticker, priceData, apiKey, newsHeadlines = null, companyName = '', perplexityAnalysis = null, riskAnalysis = null, earningsAnalysis = null) {
   const first = priceData[0];
   const latest = priceData[priceData.length - 1];
   const previous = priceData.length > 1 ? priceData[priceData.length - 2] : null;
@@ -420,6 +500,11 @@ async function getResearchNote(ticker, priceData, apiKey, newsHeadlines = null, 
     riskContext = '\n\nIdentified Recent Riskline Geopolitical/Security Alerts Impacting Company:\n' + riskAnalysis.riskSummary;
   }
 
+  let earningsContext = '';
+  if (earningsAnalysis && earningsAnalysis.analysis) {
+    earningsContext = `\n\nEarnings Call Transcript Sentiment Analysis (${earningsAnalysis.sentiment} Sentiment, Filter: ${earningsAnalysis.filterMode}):\n` + earningsAnalysis.analysis;
+  }
+
   const subjectName = companyName ? `${companyName} (${ticker})` : ticker;
 
   const summary = `
@@ -437,7 +522,7 @@ Financial & Technical Market Data for ${subjectName}:
   * Relative Strength Index (RSI 14): ${rsiVal} (${latest.rsi !== null ? (latest.rsi >= 70 ? 'Overbought signal > 70' : latest.rsi <= 30 ? 'Oversold signal < 30' : 'Neutral territory 30-70') : 'N/A'})
   * MACD Line (12,26): ${macdVal}
   * MACD Signal Line (9): ${signalVal}
-  * MACD Histogram: ${histVal} (${latest.histogram !== null ? (latest.histogram >= 0 ? 'Bullish momentum (histogram >= 0)' : 'Bearish momentum (histogram < 0)') : 'N/A'})${newsContext}${perplexityContext}${riskContext}
+  * MACD Histogram: ${histVal} (${latest.histogram !== null ? (latest.histogram >= 0 ? 'Bullish momentum (histogram >= 0)' : 'Bearish momentum (histogram < 0)') : 'N/A'})${newsContext}${perplexityContext}${riskContext}${earningsContext}
   `;
 
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -449,11 +534,11 @@ Financial & Technical Market Data for ${subjectName}:
       messages: [
         {
           role: 'system',
-          content: 'You are a professional financial research analyst. Write a concise, insightful research note analyzing the provided ticker data. Synthesize price trends, single-day session action, technical indicators (RSI & MACD), news headlines, Perplexity SWOT analysis, and Riskline alerts into actionable insights.'
+          content: 'You are a professional financial research analyst. Write a concise, insightful research note analyzing the provided ticker data. Synthesize price trends, single-day session action, technical indicators (RSI & MACD), news headlines, Perplexity SWOT analysis, Riskline alerts, and earnings call transcript sentiment into actionable insights.'
         },
         {
           role: 'user',
-          content: `${summary}\n\nIMPORTANT FORMATTING INSTRUCTION:\nOn the very first line of your response, output an overall signal rating tag in the exact format:\nRATING: BUY\nor\nRATING: NEUTRAL\nor\nRATING: SELL\n(Use SELL for definite sell signals, NEUTRAL for hold/neutral, BUY for bullish signals).\n\nThen add a blank line and write your two-paragraph AI Research Note for ${subjectName} synthesizing stock price performance, technical signals (RSI/MACD), news headlines, Perplexity SWOT implications, and Riskline risks.`
+          content: `${summary}\n\nIMPORTANT FORMATTING INSTRUCTION:\nOn the very first line of your response, output an overall signal rating tag in the exact format:\nRATING: BUY\nor\nRATING: NEUTRAL\nor\nRATING: SELL\n(Use SELL for definite sell signals, NEUTRAL for hold/neutral, BUY for bullish signals).\n\nThen add a blank line and write your two-paragraph AI Research Note for ${subjectName} synthesizing stock price performance, technical signals (RSI/MACD), news headlines, Perplexity SWOT implications, Riskline risks, and earnings call transcript sentiment.`
         }
       ]
     })
@@ -589,7 +674,7 @@ NO_RISKS_IDENTIFIED
       method: 'POST',
       headers: getOpenRouterHeaders(apiKey),
       body: JSON.stringify({
-        model: 'google/gemini-2.0-flash-lite-001',
+        model: 'google/gemini-3.5-flash-lite',
         max_tokens: 600,
         messages: [
           {
@@ -625,6 +710,248 @@ NO_RISKS_IDENTIFIED
     return { hasRisks: false, riskSummary: null };
   }
 }
+
+/**
+ * Normalizes GitHub raw URLs to ensure direct CSV access without redirect issues.
+ */
+function normalizeCsvUrl(url) {
+  let cleaned = String(url).trim();
+  if (cleaned.includes('github.com/') && cleaned.includes('/raw/')) {
+    cleaned = cleaned.replace('github.com/', 'raw.githubusercontent.com/').replace('/raw/', '/');
+  }
+  return cleaned;
+}
+
+/**
+ * Fetches CSV transcripts from provided URLs, parses them using PapaParse, and applies speaker/title filters.
+ */
+async function fetchAndProcessEarningsTranscripts(urls, filterMode) {
+  if (!urls || urls.length === 0) return null;
+
+  // Regex specifically matching analyst titles/roles (including user-specified 'analyst|researcher|managering director|managing director')
+  const analystRegex = /analyst|researcher|managering director|managing director|equity research|analyst\s*-\s*|research\s*analyst/i;
+  const companyRegex = /ceo|cfo|chief|executive|president|management|officer|vp|head|director|ir|investor relations|operator/i;
+
+  const processedTranscripts = [];
+
+  for (const rawUrl of urls) {
+    if (!rawUrl || !rawUrl.trim()) continue;
+    const url = normalizeCsvUrl(rawUrl);
+
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        console.warn(`Failed to fetch transcript from ${url}: HTTP ${response.status}`);
+        continue;
+      }
+      const csvText = await response.text();
+      const parsed = Papa.parse(csvText, { header: true, skipEmptyLines: true, dynamicTyping: false });
+
+      if (!parsed.data || parsed.data.length === 0) continue;
+
+      const fields = parsed.meta.fields || Object.keys(parsed.data[0] || {});
+
+      // Identify column names for speaker, title, and message text ("msg")
+      const speakerCol = fields.find(f => /^speaker$|^name$|^person$|^author$|^presenter$/i.test(f.trim()))
+        || fields.find(f => /speaker|name/i.test(f))
+        || 'speaker';
+
+      const titleCol = fields.find(f => /^title$|^role$|^position$|^type$|^affiliation$/i.test(f.trim()))
+        || fields.find(f => /title|role|position/i.test(f))
+        || 'title';
+
+      const textCol = fields.find(f => /^msg$|^text$|^content$|^statement$|^speech$|^quote$|^transcript$|^comment$|^message$/i.test(f.trim()))
+        || fields.find(f => /msg|text|content|statement|speech|quote|transcript|comment|message/i.test(f))
+        || 'msg';
+
+      let filteredRows = [];
+
+      if (filterMode === 'analyst') {
+        filteredRows = parsed.data.filter(row => {
+          const titleVal = String(row[titleCol] || row.title || '').trim();
+          const speakerVal = String(row[speakerCol] || row.speaker || '').trim();
+          return analystRegex.test(titleVal) || (titleVal === '' && analystRegex.test(speakerVal));
+        });
+      } else if (filterMode === 'company') {
+        filteredRows = parsed.data.filter(row => {
+          const titleVal = String(row[titleCol] || row.title || '').trim();
+          const speakerVal = String(row[speakerCol] || row.speaker || '').trim();
+          const isAnalyst = analystRegex.test(titleVal) || (titleVal === '' && analystRegex.test(speakerVal));
+          return !isAnalyst || companyRegex.test(titleVal) || companyRegex.test(speakerVal);
+        });
+      } else { // 'all'
+        filteredRows = parsed.data;
+      }
+
+      const excerpts = filteredRows.map(row => {
+        const speaker = String(row[speakerCol] || row.speaker || 'Speaker').trim();
+        const titleVal = row[titleCol] || row.title;
+        const titleStr = titleVal ? ` (${String(titleVal).trim()})` : '';
+        const textStr = String(row[textCol] || row.msg || row.text || row.content || row.statement || '').trim();
+
+        if (!textStr || textStr.length === 0) return null;
+        return `${speaker}${titleStr}: ${textStr}`;
+      }).filter(Boolean);
+
+      if (excerpts.length > 0) {
+        processedTranscripts.push({
+          url: rawUrl,
+          excerpts: excerpts.slice(0, 60) // take up to 60 statement excerpts per file
+        });
+      }
+    } catch (err) {
+      console.warn(`Error processing transcript URL ${rawUrl}:`, err);
+    }
+  }
+
+  return processedTranscripts;
+}
+
+/**
+ * Sends filtered earnings transcript excerpts to OpenRouter model for sentiment analysis.
+ */
+async function analyzeEarningsTranscripts(urls, filterMode, apiKey, ticker = '') {
+  if (!urls || urls.length === 0 || !apiKey) return null;
+
+  const processedData = await fetchAndProcessEarningsTranscripts(urls, filterMode);
+  if (!processedData || processedData.length === 0) {
+    return {
+      sentiment: 'NEUTRAL',
+      analysis: 'No transcript statements found matching the selected filter or URLs could not be fetched.',
+      urlsProcessed: urls,
+      filterMode
+    };
+  }
+
+  const combinedText = processedData.map((item, idx) => {
+    return `--- Transcript Source #${idx + 1} (${item.url}) ---\n` + item.excerpts.join('\n');
+  }).join('\n\n');
+
+  const prompt = `You are a Wall Street earnings call analyst.
+
+Company / Ticker: ${ticker || 'Target Subject'}
+Filter Applied: ${filterMode.toUpperCase()} (Mode: company management speeches, analyst Q&A questions, or all transcript rows).
+
+Here are excerpts from the fetched earnings call transcript CSV(s):
+
+${combinedText.slice(0, 12000)}
+
+TASK:
+1. Conduct a sentiment analysis on these earnings transcript excerpts.
+2. Output an overall sentiment rating: POSITIVE, NEGATIVE, or NEUTRAL.
+3. Provide a clear 2-3 bullet point summary detailing:
+   - Overall tone (confident, optimistic, cautious, defensive, or uncertain)
+   - Core operational/financial commentary or key analyst concerns
+   - Sentiment implications for future stock guidance.
+
+CRITICAL INSTRUCTION:
+On the very first line of your response, output:
+SENTIMENT: POSITIVE
+or
+SENTIMENT: NEGATIVE
+or
+SENTIMENT: NEUTRAL
+
+Then add a blank line and write your bulleted sentiment analysis.`;
+
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: getOpenRouterHeaders(apiKey),
+      body: JSON.stringify({
+        model: 'google/gemini-3.5-flash-lite',
+        max_tokens: 700,
+        messages: [
+          { role: 'system', content: 'You are an expert earnings transcript sentiment analyst.' },
+          { role: 'user', content: prompt }
+        ]
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenRouter earnings analysis call failed: ${await readOpenRouterError(response)}`);
+    }
+
+    const data = await response.json();
+    const rawContent = data.choices?.[0]?.message?.content?.trim() || '';
+
+    let sentiment = 'NEUTRAL';
+    let analysis = rawContent;
+
+    const sentimentMatch = rawContent.match(/^SENTIMENT:\s*(POSITIVE|NEGATIVE|NEUTRAL)/i);
+    if (sentimentMatch) {
+      sentiment = sentimentMatch[1].toUpperCase();
+      analysis = rawContent.replace(/^SENTIMENT:\s*(POSITIVE|NEGATIVE|NEUTRAL)\s*/i, '').trim();
+    }
+
+    return {
+      sentiment,
+      analysis,
+      urlsProcessed: urls,
+      filterMode
+    };
+  } catch (err) {
+    return {
+      sentiment: 'NEUTRAL',
+      analysis: `Earnings transcript analysis failed: ${err.message}`,
+      urlsProcessed: urls,
+      filterMode
+    };
+  }
+}
+
+// Standalone button listener for "Analyze Earnings Calls"
+document.addEventListener('DOMContentLoaded', () => {
+  const analyzeEarningsBtn = document.getElementById('analyze-earnings-btn');
+  if (analyzeEarningsBtn) {
+    analyzeEarningsBtn.addEventListener('click', async () => {
+      const ticker = document.getElementById('ticker')?.value.trim().toUpperCase() || 'Company';
+      const openRouterKey = cleanApiKey(document.getElementById('openrouter-key')?.value || '');
+      const urls = getTranscriptUrls();
+      const filterMode = getTranscriptFilterMode();
+
+      if (urls.length === 0) {
+        alert('Please enter at least 1 earnings call transcript CSV URL.');
+        return;
+      }
+
+      if (!openRouterKey) {
+        alert('Please enter an OpenRouter API key in the form field above to run AI sentiment analysis on the transcripts.');
+        return;
+      }
+
+      const origText = analyzeEarningsBtn.innerHTML;
+      analyzeEarningsBtn.disabled = true;
+      analyzeEarningsBtn.innerHTML = 'Analyzing Transcripts...';
+
+      try {
+        const result = await analyzeEarningsTranscripts(urls, filterMode, openRouterKey, ticker);
+        lastEarningsAnalysis = result;
+
+        let cardElem = document.getElementById('earnings-section-card');
+        if (cardElem) {
+          cardElem.outerHTML = renderEarningsSectionHtml(result, ticker);
+        } else {
+          let standaloneElem = document.getElementById('standalone-earnings-results');
+          if (!standaloneElem) {
+            standaloneElem = document.createElement('div');
+            standaloneElem.id = 'standalone-earnings-results';
+            results.prepend(standaloneElem);
+          }
+          standaloneElem.innerHTML = renderEarningsSectionHtml(result, ticker);
+        }
+
+        const targetElem = document.getElementById('earnings-section-card') || document.getElementById('standalone-earnings-results');
+        if (targetElem) targetElem.scrollIntoView({ behavior: 'smooth' });
+      } catch (err) {
+        alert('Transcript analysis failed: ' + err.message);
+      } finally {
+        analyzeEarningsBtn.disabled = false;
+        analyzeEarningsBtn.innerHTML = origText;
+      }
+    });
+  }
+});
 
 // Pulls the useful part out of an OpenRouter error response: the HTTP status,
 // a plain-language hint for the common cases, and the message OpenRouter (or
@@ -729,7 +1056,7 @@ function renderPerplexityAnalysisCard(perplexityAnalysis, newsHeadlines) {
   return `<div class="perplexity-body">${htmlContent}</div>${citationsListHtml}`;
 }
 
-function renderResults(ticker, priceData, note, newsHeadlines = null, newsError = null, companyName = '', perplexityAnalysis = null, riskAnalysis = null) {
+function renderResults(ticker, priceData, note, newsHeadlines = null, newsError = null, companyName = '', perplexityAnalysis = null, riskAnalysis = null, earningsAnalysis = null) {
   const latest = priceData[priceData.length - 1];
   const previous = priceData.length > 1 ? priceData[priceData.length - 2] : null;
 
@@ -953,6 +1280,8 @@ function renderResults(ticker, priceData, note, newsHeadlines = null, newsError 
           : `<p class="no-risks-message">No recent risks identified for ${escapeHtml(ticker)}</p>`
       }
     </div>
+
+    ${renderEarningsSectionHtml(earningsAnalysis || lastEarningsAnalysis, ticker)}
 
     <div class="note-box">
       <h3>AI Research Note</h3>

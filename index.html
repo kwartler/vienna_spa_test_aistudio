@@ -26,10 +26,40 @@
         <input id="newsdata-key" name="newsdata-key" type="password" placeholder="pub_... (optional)" />
         <p class="field-hint">Get a free key at <a href="https://newsdata.io/" target="_blank" rel="noopener">newsdata.io</a> to fetch latest market headlines.</p>
 
-        <label for="openrouter-key">OpenRouter API key (Optional for AI note)</label>
+        <label for="openrouter-key">OpenRouter API key (Optional for AI note & transcript analysis)</label>
         <input id="openrouter-key" name="openrouter-key" type="password" placeholder="sk-or-... (optional)" />
 
-        <button type="submit">Analyze</button>
+        <div class="form-section-divider">
+          <label class="section-title">Earnings Call Transcripts (Optional, up to 4 CSV URLs)</label>
+          <p class="field-hint">Enter CSV transcript URLs (e.g., from MarketBeat or S&P 500 earnings archives).</p>
+          
+          <div class="transcript-urls-group">
+            <input id="transcript-url-1" name="transcript-url-1" type="url" placeholder="URL 1: https://.../AAPL_2024-08-01.csv" />
+            <input id="transcript-url-2" name="transcript-url-2" type="url" placeholder="URL 2: (optional)" />
+            <input id="transcript-url-3" name="transcript-url-3" type="url" placeholder="URL 3: (optional)" />
+            <input id="transcript-url-4" name="transcript-url-4" type="url" placeholder="URL 4: (optional)" />
+          </div>
+
+          <label class="radio-group-label">Filter Speaker / Content:</label>
+          <div class="radio-group">
+            <label class="radio-option">
+              <input type="radio" name="transcript-filter" value="all" checked />
+              <span>All Speakers</span>
+            </label>
+            <label class="radio-option">
+              <input type="radio" name="transcript-filter" value="company" />
+              <span>Company Management</span>
+            </label>
+            <label class="radio-option">
+              <input type="radio" name="transcript-filter" value="analyst" />
+              <span>Analyst / Researchers</span>
+            </label>
+          </div>
+
+          <button type="button" id="analyze-earnings-btn" class="secondary-btn">Analyze Earnings Calls</button>
+        </div>
+
+        <button type="submit" class="primary-btn">Analyze All Data</button>
       </form>
     </section>
 
