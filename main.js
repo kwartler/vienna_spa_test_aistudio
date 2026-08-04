@@ -16,6 +16,151 @@ let currentChart = null;
 let currentResizeObserver = null;
 let lastEarningsAnalysis = null;
 
+/**
+ * Normalizes and deduplicates extracted product entities from transcript analysis.
+ */
+function deduplicateProducts(products) {
+  if (!Array.isArray(products)) return [];
+  const map = new Map();
+  for (const item of products) {
+    if (!item) continue;
+    let name = '';
+    let category = '';
+    let context = '';
+
+    if (typeof item === 'string') {
+      name = item.trim();
+    } else if (typeof item === 'object') {
+      name = String(item.name || item.product || item.product_name || item.entity || '').trim();
+      category = String(item.category || item.type || item.product_type || '').trim();
+      context = String(item.context || item.description || item.mention || item.details || '').trim();
+    }
+
+    name = name.replace(/^["'‘“`]+|["'’”`]+$/g, '').trim();
+    if (!name || name.length < 2) continue;
+
+    const key = name.toLowerCase();
+    if (!map.has(key)) {
+      map.set(key, {
+        name: name,
+        category: category || 'Product / Service',
+        context: context || 'Mentioned in transcript'
+      });
+    } else {
+      const existing = map.get(key);
+      if ((!existing.context || existing.context.length < context.length) && context) {
+        existing.context = context;
+      }
+      if ((!existing.category || existing.category === 'Product / Service') && category) {
+        existing.category = category;
+      }
+    }
+  }
+  return Array.from(map.values());
+}
+
+function parseEarningsJson(rawContent) {
+  if (!rawContent || typeof rawContent !== 'string') {
+    return { sentiment: 'NEUTRAL', analysis: '', products: [] };
+  }
+
+  let text = rawContent.trim();
+
+  // Strip markdown code fences if present
+  const codeMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (codeMatch) {
+    text = codeMatch[1].trim();
+  }
+
+  let parsedObj = null;
+
+  // Attempt 1: Direct JSON.parse
+  try {
+    parsedObj = JSON.parse(text);
+  } catch (e1) {
+    // Attempt 2: Fix unescaped newlines inside quotes
+    try {
+      const sanitized = text.replace(/"([^"\\]*(\\.[^"\\]*)*)"/g, (match) => {
+        return match.replace(/\r?\n/g, '\\n');
+      });
+      parsedObj = JSON.parse(sanitized);
+    } catch (e2) {
+      // Attempt 3: Extract from first { to last }
+      try {
+        const start = text.indexOf('{');
+        const end = text.lastIndexOf('}');
+        if (start !== -1 && end > start) {
+          const jsonSub = text.substring(start, end + 1);
+          const jsonCleaned = jsonSub.replace(/(?<=:\s*"[^"]*)\r?\n(?=[^"]*")/g, ' ');
+          parsedObj = JSON.parse(jsonCleaned);
+        }
+      } catch (e3) {
+        console.warn('JSON parse attempts failed:', e3);
+      }
+    }
+  }
+
+  let sentiment = 'NEUTRAL';
+  let analysis = '';
+  let products = [];
+
+  if (parsedObj && typeof parsedObj === 'object') {
+    if (parsedObj.sentiment) {
+      const s = String(parsedObj.sentiment).trim().toUpperCase();
+      if (['POSITIVE', 'NEGATIVE', 'NEUTRAL'].includes(s)) {
+        sentiment = s;
+      }
+    }
+
+    if (parsedObj.analysis) {
+      if (typeof parsedObj.analysis === 'string') {
+        analysis = parsedObj.analysis;
+      } else if (Array.isArray(parsedObj.analysis)) {
+        analysis = parsedObj.analysis.map(item => `• ${item}`).join('\n');
+      } else {
+        analysis = JSON.stringify(parsedObj.analysis);
+      }
+    }
+
+    const rawProds = parsedObj.products || parsedObj.entities || parsedObj.product_names || parsedObj.extracted_products || parsedObj.product_entities || parsedObj.items;
+    if (Array.isArray(rawProds)) {
+      products = deduplicateProducts(rawProds);
+    }
+  } else {
+    // Robust Regex Fallbacks when JSON parsing fails completely
+    const sentimentMatch = text.match(/"sentiment"\s*:\s*"?(POSITIVE|NEGATIVE|NEUTRAL)"?/i) || text.match(/SENTIMENT:\s*(POSITIVE|NEGATIVE|NEUTRAL)/i);
+    if (sentimentMatch) {
+      sentiment = sentimentMatch[1].toUpperCase();
+    }
+
+    const analysisMatch = text.match(/"analysis"\s*:\s*"([\s\S]*?)"\s*,\s*"(?:products|entities|product_names)"/i) || text.match(/"analysis"\s*:\s*"([\s\S]*?)"\s*}/i);
+    if (analysisMatch) {
+      analysis = analysisMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"');
+    } else {
+      analysis = text
+        .replace(/"sentiment"\s*:\s*"[^"]*"\s*,?/gi, '')
+        .replace(/"analysis"\s*:\s*"/gi, '')
+        .replace(/"(?:products|entities|product_names)"\s*:\s*\[[\s\S]*\]\s*\}?/gi, '')
+        .replace(/^[{}]+|[{}]+$/g, '')
+        .trim();
+    }
+
+    const productsMatch = text.match(/"(?:products|entities|product_names|extracted_products)"\s*:\s*(\[[\s\S]*?\])/i);
+    if (productsMatch) {
+      try {
+        const rawProds = JSON.parse(productsMatch[1]);
+        if (Array.isArray(rawProds)) {
+          products = deduplicateProducts(rawProds);
+        }
+      } catch (err) {
+        console.warn('Could not parse products regex match:', err);
+      }
+    }
+  }
+
+  return { sentiment, analysis, products };
+}
+
 function renderEarningsSectionHtml(earningsAnalysis, ticker = '', isUpdating = false) {
   if (!earningsAnalysis) {
     return `
@@ -29,19 +174,106 @@ function renderEarningsSectionHtml(earningsAnalysis, ticker = '', isUpdating = f
     `;
   }
 
+  let sentiment = earningsAnalysis.sentiment || 'NEUTRAL';
+  let analysis = earningsAnalysis.analysis || '';
+  let products = earningsAnalysis.products && Array.isArray(earningsAnalysis.products) ? earningsAnalysis.products : [];
+
+  // Safety check: If analysis string itself is a raw JSON string or starts with ```json or { "sentiment", parse it on the fly!
+  if (typeof analysis === 'string' && (analysis.trim().startsWith('{') || analysis.trim().startsWith('```'))) {
+    const reParsed = parseEarningsJson(analysis);
+    if (reParsed.analysis && reParsed.analysis !== analysis) {
+      analysis = reParsed.analysis;
+      if (reParsed.sentiment && reParsed.sentiment !== 'NEUTRAL') {
+        sentiment = reParsed.sentiment;
+      }
+      if (reParsed.products && reParsed.products.length > 0 && products.length === 0) {
+        products = reParsed.products;
+      }
+    }
+  }
+
   const updatingBadge = isUpdating ? ' <span style="font-size: 0.8rem; font-weight: normal; color: #2563eb; margin-left: 0.5rem;">(Updating...)</span>' : '';
   const tickerLabel = ticker && ticker !== 'Company' ? ` (${escapeHtml(ticker)})` : '';
+
+  const productsCount = products.length;
+  let productsBodyHtml = '';
+
+  if (productsCount > 0) {
+    const tableRows = products.map(p => `
+      <tr>
+        <td class="product-name-cell"><strong>${escapeHtml(p.name)}</strong></td>
+        <td><span class="product-category-tag">${escapeHtml(p.category || 'Product')}</span></td>
+        <td class="product-context-cell">${escapeHtml(p.context || 'Mentioned in call')}</td>
+      </tr>
+    `).join('');
+
+    productsBodyHtml = `
+      <div class="products-table-wrapper">
+        <table class="products-table">
+          <thead>
+            <tr>
+              <th>Product Name</th>
+              <th>Category</th>
+              <th>Transcript Context</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${tableRows}
+          </tbody>
+        </table>
+      </div>
+    `;
+  } else {
+    productsBodyHtml = `
+      <div class="no-products-note">
+        <em>No specific product names or brand offerings were explicitly identified in these transcript excerpts.</em>
+      </div>
+    `;
+  }
+
+  const productsHtml = `
+    <details class="products-collapsible" open>
+      <summary class="products-summary">
+        <div class="summary-left">
+          <svg class="collapsible-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+          <strong>Extracted Product Entities (${productsCount})</strong>
+        </div>
+        <span class="collapse-hint">Click to expand / collapse</span>
+      </summary>
+      ${productsBodyHtml}
+    </details>
+  `;
+
+  const auditHtml = `
+    <details class="products-collapsible audit-collapsible" style="margin-top: 0.75rem; border-color: #e2e8f0;">
+      <summary class="products-summary" style="background: #f8fafc; font-size: 0.82rem;">
+        <div class="summary-left">
+          <svg class="collapsible-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+          <strong>LLM Audit & System Prompt Details</strong>
+        </div>
+        <span class="collapse-hint">Model: ${escapeHtml(earningsAnalysis.modelUsed || 'google/gemini-3.5-flash-lite')} | Statements: ${earningsAnalysis.totalStatements || 0}</span>
+      </summary>
+      <div style="padding: 0.75rem; font-size: 0.8rem; background: #fafafa; border-top: 1px solid #e2e8f0; color: #334155;">
+        <div style="margin-bottom: 0.5rem;"><strong>Model Call:</strong> OpenRouter <code>${escapeHtml(earningsAnalysis.modelUsed || 'google/gemini-3.5-flash-lite')}</code></div>
+        <div style="margin-bottom: 0.5rem;"><strong>Statements Processed:</strong> ${earningsAnalysis.totalStatements || 0} transcript row excerpts</div>
+        <div style="margin-bottom: 0.5rem;"><strong>System Prompt:</strong><br><pre style="background: #ffffff; padding: 0.5rem; border: 1px solid #e2e8f0; border-radius: 4px; white-space: pre-wrap; font-family: monospace; font-size: 0.75rem; margin-top: 0.25rem;">${escapeHtml(earningsAnalysis.systemPrompt || 'You are an expert earnings transcript sentiment and named entity extraction analyst.')}</pre></div>
+        <div><strong>User Prompt (Prompt sent to Gemini):</strong><br><pre style="background: #ffffff; padding: 0.5rem; border: 1px solid #e2e8f0; border-radius: 4px; white-space: pre-wrap; font-family: monospace; font-size: 0.75rem; margin-top: 0.25rem; max-height: 200px; overflow-y: auto;">${escapeHtml(earningsAnalysis.userPrompt || 'N/A')}</pre></div>
+      </div>
+    </details>
+  `;
 
   return `
     <div class="note-box earnings-section" id="earnings-section-card">
       <div class="earnings-header">
         <h3>Earnings Call Transcripts Analysis${tickerLabel}${updatingBadge}</h3>
-        <span class="sentiment-badge ${earningsAnalysis.sentiment.toLowerCase()}">${earningsAnalysis.sentiment} SENTIMENT</span>
+        <span class="sentiment-badge ${sentiment.toLowerCase()}">${sentiment} SENTIMENT</span>
       </div>
       <div class="earnings-meta">
-        Filter Mode: <strong>${escapeHtml(earningsAnalysis.filterMode.toUpperCase())}</strong> | Transcripts Processed: ${earningsAnalysis.urlsProcessed ? earningsAnalysis.urlsProcessed.length : 0}
+        Filter Mode: <strong>${escapeHtml((earningsAnalysis.filterMode || 'ALL').toUpperCase())}</strong> | Transcripts Processed: ${earningsAnalysis.urlsProcessed ? earningsAnalysis.urlsProcessed.length : 0} | Statements Parsed: <strong>${earningsAnalysis.totalStatements || 0}</strong>
       </div>
-      <div class="earnings-body">${formatMarkdownOrText(earningsAnalysis.analysis)}</div>
+      <div class="earnings-body">${formatMarkdownOrText(analysis)}</div>
+      ${productsHtml}
+      ${auditHtml}
     </div>
   `;
 }
@@ -752,30 +984,45 @@ async function fetchAndProcessEarningsTranscripts(urls, filterMode) {
       const fields = parsed.meta.fields || Object.keys(parsed.data[0] || {});
 
       // Identify column names for speaker, title, and message text ("msg")
-      const speakerCol = fields.find(f => /^speaker$|^name$|^person$|^author$|^presenter$/i.test(f.trim()))
-        || fields.find(f => /speaker|name/i.test(f))
-        || 'speaker';
+      let speakerCol = fields.find(f => /^(speaker|name|person|author|presenter|executive|participant)$/i.test(f.trim()))
+        || fields.find(f => /speaker|name|person|author|presenter|participant/i.test(f));
 
-      const titleCol = fields.find(f => /^title$|^role$|^position$|^type$|^affiliation$/i.test(f.trim()))
-        || fields.find(f => /title|role|position/i.test(f))
-        || 'title';
+      let titleCol = fields.find(f => /^(title|role|position|type|affiliation|designation)$/i.test(f.trim()))
+        || fields.find(f => /title|role|position|type|affiliation/i.test(f));
 
-      const textCol = fields.find(f => /^msg$|^text$|^content$|^statement$|^speech$|^quote$|^transcript$|^comment$|^message$/i.test(f.trim()))
-        || fields.find(f => /msg|text|content|statement|speech|quote|transcript|comment|message/i.test(f))
-        || 'msg';
+      // Specifically find the 'msg' column (case-insensitive, trimmed)
+      let msgCol = fields.find(f => /^msg$/i.test(f.trim()))
+        || fields.find(f => /^(msg|message|statement|text|speech|quote|content|transcript|comment|body|words)$/i.test(f.trim()))
+        || fields.find(f => /msg|message|statement|text|speech|content/i.test(f.trim()));
+
+      // Fallback: If msgCol is still not found in headers, find the column with the longest average text length
+      if (!msgCol || !fields.includes(msgCol)) {
+        let maxAvgLen = -1;
+        fields.forEach(f => {
+          let sum = 0, count = 0;
+          parsed.data.slice(0, 15).forEach(r => {
+            if (r[f]) { sum += String(r[f]).length; count++; }
+          });
+          const avg = count > 0 ? sum / count : 0;
+          if (avg > maxAvgLen) {
+            maxAvgLen = avg;
+            msgCol = f;
+          }
+        });
+      }
 
       let filteredRows = [];
 
       if (filterMode === 'analyst') {
         filteredRows = parsed.data.filter(row => {
-          const titleVal = String(row[titleCol] || row.title || '').trim();
-          const speakerVal = String(row[speakerCol] || row.speaker || '').trim();
+          const titleVal = String((titleCol && row[titleCol]) || row.title || '').trim();
+          const speakerVal = String((speakerCol && row[speakerCol]) || row.speaker || '').trim();
           return analystRegex.test(titleVal) || (titleVal === '' && analystRegex.test(speakerVal));
         });
       } else if (filterMode === 'company') {
         filteredRows = parsed.data.filter(row => {
-          const titleVal = String(row[titleCol] || row.title || '').trim();
-          const speakerVal = String(row[speakerCol] || row.speaker || '').trim();
+          const titleVal = String((titleCol && row[titleCol]) || row.title || '').trim();
+          const speakerVal = String((speakerCol && row[speakerCol]) || row.speaker || '').trim();
           const isAnalyst = analystRegex.test(titleVal) || (titleVal === '' && analystRegex.test(speakerVal));
           return !isAnalyst || companyRegex.test(titleVal) || companyRegex.test(speakerVal);
         });
@@ -784,19 +1031,21 @@ async function fetchAndProcessEarningsTranscripts(urls, filterMode) {
       }
 
       const excerpts = filteredRows.map(row => {
-        const speaker = String(row[speakerCol] || row.speaker || 'Speaker').trim();
-        const titleVal = row[titleCol] || row.title;
+        const speaker = String((speakerCol && row[speakerCol]) || row.speaker || 'Speaker').trim();
+        const titleVal = titleCol ? row[titleCol] : row.title;
         const titleStr = titleVal ? ` (${String(titleVal).trim()})` : '';
-        const textStr = String(row[textCol] || row.msg || row.text || row.content || row.statement || '').trim();
 
-        if (!textStr || textStr.length === 0) return null;
-        return `${speaker}${titleStr}: ${textStr}`;
+        // Extract speech message strictly from the 'msg' column
+        const msgText = String((msgCol && row[msgCol] !== undefined) ? row[msgCol] : (row.msg || row.MSG || row.text || row.content || row.statement || '')).trim();
+
+        if (!msgText || msgText.length === 0) return null;
+        return `[Speaker: ${speaker}${titleStr}] [msg]: ${msgText}`;
       }).filter(Boolean);
 
       if (excerpts.length > 0) {
         processedTranscripts.push({
           url: rawUrl,
-          excerpts: excerpts.slice(0, 60) // take up to 60 statement excerpts per file
+          excerpts: excerpts.slice(0, 300) // take up to 300 statement excerpts per file
         });
       }
     } catch (err) {
@@ -808,7 +1057,85 @@ async function fetchAndProcessEarningsTranscripts(urls, filterMode) {
 }
 
 /**
- * Sends filtered earnings transcript excerpts to OpenRouter model for sentiment analysis.
+ * Scans raw transcript text for known product names, hardware, software, services, and brand terms as a heuristic backup.
+ */
+function extractEntitiesFromTranscriptText(text) {
+  if (!text) return [];
+  const found = [];
+
+  const knownProducts = [
+    { name: 'iPhone', category: 'Hardware / Mobile', regex: /\biPhone(?:s|\s+\d+(?:\s*(?:Pro|Max|Plus|Mini))?)?\b/gi },
+    { name: 'iPad', category: 'Hardware / Tablet', regex: /\biPad(?:s|\s+(?:Pro|Air|Mini))?\b/gi },
+    { name: 'Mac', category: 'Hardware / PC', regex: /\bMac(?:s|Book(?:\s*(?:Air|Pro))?|Studio|Pro|mini)?\b/gi },
+    { name: 'Apple Watch', category: 'Wearables', regex: /\bApple\s*Watch(?:es|\s+(?:Ultra|Series\s*\d+))?\b/gi },
+    { name: 'AirPods', category: 'Wearables / Audio', regex: /\bAirPods(?:\s+(?:Pro|Max))?\b/gi },
+    { name: 'Vision Pro', category: 'Hardware / VR', regex: /\b(?:Apple\s*)?Vision\s*Pro\b/gi },
+    { name: 'Apple Pay', category: 'Financial Services', regex: /\bApple\s*Pay\b/gi },
+    { name: 'Apple Card', category: 'Financial Services', regex: /\bApple\s*Card\b/gi },
+    { name: 'Services', category: 'Subscription / Services', regex: /\bServices(?:\s+(?:revenue|segment|business))?\b/gi },
+    { name: 'iCloud', category: 'Cloud Services', regex: /\biCloud(?:\+)?\b/gi },
+    { name: 'App Store', category: 'Digital Marketplace', regex: /\bApp\s*Store\b/gi },
+    { name: 'Apple Music', category: 'Digital Media', regex: /\bApple\s*Music\b/gi },
+    { name: 'Apple TV+', category: 'Streaming Media', regex: /\bApple\s*TV(?:\+)?\b/gi },
+    { name: 'Azure', category: 'Cloud Platform', regex: /\bAzure\b/gi },
+    { name: 'AWS', category: 'Cloud Platform', regex: /\bAWS|Amazon\s*Web\s*Services\b/gi },
+    { name: 'Google Cloud / GCP', category: 'Cloud Platform', regex: /\bGoogle\s*Cloud|GCP\b/gi },
+    { name: 'Copilot', category: 'AI Product', regex: /\bCopilot\b/gi },
+    { name: 'Gemini', category: 'AI Model / Platform', regex: /\bGemini\b/gi },
+    { name: 'ChatGPT', category: 'AI Application', regex: /\bChatGPT\b/gi },
+    { name: 'Windows', category: 'Software / OS', regex: /\bWindows(?:\s*\d+)?\b/gi },
+    { name: 'Xbox', category: 'Gaming Platform', regex: /\bXbox\b/gi },
+    { name: 'PlayStation', category: 'Gaming Platform', regex: /\bPlayStation|PS5\b/gi },
+    { name: 'Pixel', category: 'Hardware / Mobile', regex: /\bPixel(?:\s*\d+(?:a|Pro)?)?\b/gi },
+    { name: 'Galaxy', category: 'Hardware / Mobile', regex: /\bGalaxy(?:\s*(?:S\d+|Z\s*Fold|Z\s*Flip))?\b/gi },
+    { name: 'Snapdragon', category: 'Hardware / Processor', regex: /\bSnapdragon\b/gi },
+    { name: 'Model Y', category: 'Automotive', regex: /\bModel\s*Y\b/gi },
+    { name: 'Model 3', category: 'Automotive', regex: /\bModel\s*3\b/gi },
+    { name: 'Cybertruck', category: 'Automotive', regex: /\bCybertruck\b/gi },
+    { name: 'FSD / Full Self-Driving', category: 'Automotive Software', regex: /\bFSD|Full\s*Self-?Driving\b/gi },
+    { name: 'Megapack', category: 'Energy Storage', regex: /\bMegapack\b/gi },
+    { name: 'CUDA', category: 'Software Platform', regex: /\bCUDA\b/gi },
+    { name: 'Blackwell', category: 'Hardware / AI Chip', regex: /\bBlackwell\b/gi },
+    { name: 'Hopper / H100', category: 'Hardware / AI Chip', regex: /\bHopper|H100|H200\b/gi }
+  ];
+
+  for (const kp of knownProducts) {
+    if (kp.regex.test(text)) {
+      kp.regex.lastIndex = 0;
+      const idx = text.search(kp.regex);
+      let snippet = 'Mentioned in transcript speech.';
+      if (idx !== -1) {
+        const start = Math.max(0, idx - 30);
+        const end = Math.min(text.length, idx + 100);
+        snippet = '...' + text.substring(start, end).replace(/\s+/g, ' ').trim() + '...';
+      }
+      found.push({
+        name: kp.name,
+        category: kp.category,
+        context: snippet
+      });
+    }
+  }
+
+  // Also match quoted terms or capitalized product terms like "Product Name"
+  const quotedPattern = /"([A-Z][A-Za-z0-9\s]{2,25})"/g;
+  let qMatch;
+  while ((qMatch = quotedPattern.exec(text)) !== null) {
+    const term = qMatch[1].trim();
+    if (term.length > 2 && !/^(the|and|for|with|this|that|from|our|your|year|quarter|march|june|september|december)$/i.test(term)) {
+      found.push({
+        name: term,
+        category: 'Product / Offering',
+        context: `Mentioned in transcript speech as "${term}"`
+      });
+    }
+  }
+
+  return deduplicateProducts(found);
+}
+
+/**
+ * Sends filtered earnings transcript excerpts to OpenRouter model for sentiment analysis and entity extraction.
  */
 async function analyzeEarningsTranscripts(urls, filterMode, apiKey, ticker = '') {
   if (!urls || urls.length === 0 || !apiKey) return null;
@@ -818,52 +1145,72 @@ async function analyzeEarningsTranscripts(urls, filterMode, apiKey, ticker = '')
     return {
       sentiment: 'NEUTRAL',
       analysis: 'No transcript statements found matching the selected filter or URLs could not be fetched.',
+      products: [],
       urlsProcessed: urls,
-      filterMode
+      filterMode,
+      systemPrompt: 'N/A - No transcripts parsed',
+      userPrompt: 'N/A',
+      modelUsed: 'google/gemini-3.5-flash-lite',
+      totalStatements: 0
     };
   }
+
+  const totalStatements = processedData.reduce((acc, curr) => acc + curr.excerpts.length, 0);
 
   const combinedText = processedData.map((item, idx) => {
     return `--- Transcript Source #${idx + 1} (${item.url}) ---\n` + item.excerpts.join('\n');
   }).join('\n\n');
 
-  const prompt = `You are a Wall Street earnings call analyst.
+  // Fallback heuristic extraction from raw transcript text
+  const heuristicProducts = extractEntitiesFromTranscriptText(combinedText);
+
+  const systemPrompt = 'You are a comprehensive Named Entity Extraction (NER) and Financial Sentiment Engine. Your MANDATORY top priority is to examine the transcript [msg] text thoroughly and extract EVERY SINGLE named product, hardware device, software suite, cloud service, chip, app, brand offering, or revenue segment mentioned by any speaker (e.g. iPhone, iPad, Mac, Apple Watch, AirPods, Vision Pro, Services, iCloud, App Store, Azure, AWS, Gemini, Copilot, Pixel, Model Y, etc.). CAST A WIDE NET. Output strictly valid JSON.';
+
+  const userPrompt = `You are an expert financial analyst and named entity extraction engine.
 
 Company / Ticker: ${ticker || 'Target Subject'}
-Filter Applied: ${filterMode.toUpperCase()} (Mode: company management speeches, analyst Q&A questions, or all transcript rows).
+Filter Applied: ${filterMode.toUpperCase()}
 
-Here are excerpts from the fetched earnings call transcript CSV(s):
+Below are transcript statement excerpts from the earnings call CSV files. Each line contains speaker details and speech text extracted strictly from the 'msg' column:
 
-${combinedText.slice(0, 12000)}
+${combinedText.slice(0, 45000)}
 
-TASK:
+COMPREHENSIVE ENTITY EXTRACTION TASK:
 1. Conduct a sentiment analysis on these earnings transcript excerpts.
-2. Output an overall sentiment rating: POSITIVE, NEGATIVE, or NEUTRAL.
-3. Provide a clear 2-3 bullet point summary detailing:
-   - Overall tone (confident, optimistic, cautious, defensive, or uncertain)
-   - Core operational/financial commentary or key analyst concerns
-   - Sentiment implications for future stock guidance.
+2. CAST A WIDE NET: Examine the [msg] speech text with MAXIMUM SENSITIVITY and extract ALL distinct PRODUCT NAMES, hardware devices, software platforms, cloud services, brand offerings, hardware models, chips, applications, or key named solutions mentioned by speakers.
+   - Examples of products/services to look for and extract: iPhone, iPad, Mac, Apple Watch, AirPods, Vision Pro, Apple Pay, Services, App Store, iCloud, Azure, AWS, Google Cloud, Copilot, Gemini, ChatGPT, Windows, Xbox, Pixel, Galaxy, Snapdragon, Model Y, Model 3, Cybertruck, FSD, CUDA, Blackwell, Hopper, H100, etc.
+   - DO NOT LEAVE OUT ANY KNOWN PRODUCTS. If "iPhone" or "Mac" or "Services" or any product name appears in the [msg] text, YOU MUST INCLUDE IT in the "products" array!
+3. Deduplicate entities and summarize a concise 1-sentence context for each extracted product entity based on the [msg] speech text.
 
-CRITICAL INSTRUCTION:
-On the very first line of your response, output:
-SENTIMENT: POSITIVE
-or
-SENTIMENT: NEGATIVE
-or
-SENTIMENT: NEUTRAL
+OUTPUT REQUIREMENTS:
+You MUST respond with a single valid JSON object strictly matching this schema:
+{
+  "sentiment": "POSITIVE" | "NEGATIVE" | "NEUTRAL",
+  "analysis": "A concise 2-3 bullet point summary detailing overall sentiment tone, core operational/financial highlights, and future guidance implications.",
+  "products": [
+    {
+      "name": "Exact or standard name of the product mentioned in the [msg] text",
+      "category": "e.g., Hardware, Software, Cloud Service, AI Model, Platform, Subscription",
+      "context": "Brief 1-sentence context on how this product was mentioned or performing"
+    }
+  ]
+}
 
-Then add a blank line and write your bulleted sentiment analysis.`;
+IMPORTANT: In the "analysis" field, use clean text with \\n for line breaks. DO NOT leave "products" empty if product or brand names are present in the [msg] text. DO NOT include any commentary outside the JSON object.`;
+
+  const modelName = 'google/gemini-3.5-flash-lite';
 
   try {
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: getOpenRouterHeaders(apiKey),
       body: JSON.stringify({
-        model: 'google/gemini-3.5-flash-lite',
-        max_tokens: 700,
+        model: modelName,
+        max_tokens: 1500,
+        response_format: { type: "json_object" },
         messages: [
-          { role: 'system', content: 'You are an expert earnings transcript sentiment analyst.' },
-          { role: 'user', content: prompt }
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
         ]
       })
     });
@@ -875,27 +1222,35 @@ Then add a blank line and write your bulleted sentiment analysis.`;
     const data = await response.json();
     const rawContent = data.choices?.[0]?.message?.content?.trim() || '';
 
-    let sentiment = 'NEUTRAL';
-    let analysis = rawContent;
+    const parsed = parseEarningsJson(rawContent);
 
-    const sentimentMatch = rawContent.match(/^SENTIMENT:\s*(POSITIVE|NEGATIVE|NEUTRAL)/i);
-    if (sentimentMatch) {
-      sentiment = sentimentMatch[1].toUpperCase();
-      analysis = rawContent.replace(/^SENTIMENT:\s*(POSITIVE|NEGATIVE|NEUTRAL)\s*/i, '').trim();
-    }
+    // Merge LLM extracted products with heuristic regex extracted products to ensure complete coverage
+    const combinedProducts = deduplicateProducts([...(parsed.products || []), ...heuristicProducts]);
 
     return {
-      sentiment,
-      analysis,
+      sentiment: parsed.sentiment,
+      analysis: parsed.analysis,
+      products: combinedProducts,
       urlsProcessed: urls,
-      filterMode
+      filterMode,
+      systemPrompt,
+      userPrompt,
+      modelUsed: modelName,
+      totalStatements,
+      transcriptPreview: combinedText.slice(0, 1000)
     };
   } catch (err) {
+    const fallbackProducts = heuristicProducts;
     return {
       sentiment: 'NEUTRAL',
       analysis: `Earnings transcript analysis failed: ${err.message}`,
+      products: fallbackProducts,
       urlsProcessed: urls,
-      filterMode
+      filterMode,
+      systemPrompt,
+      userPrompt,
+      modelUsed: modelName,
+      totalStatements
     };
   }
 }

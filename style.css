@@ -957,11 +957,150 @@ button:hover {
   color: var(--ink);
 }
 
+/* Collapsible Products / Entity Extraction Table */
+.products-collapsible {
+  margin-top: 1.25rem;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  transition: all 0.2s ease;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+}
+
+.products-collapsible[open] {
+  border-color: #cbd5e1;
+}
+
+.products-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  background: #f1f5f9;
+  cursor: pointer;
+  user-select: none;
+  font-size: 0.9rem;
+  color: #1e293b;
+  list-style: none;
+}
+
+.products-summary::-webkit-details-marker {
+  display: none;
+}
+
+.products-summary:hover {
+  background: #e2e8f0;
+}
+
+.summary-left {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.collapsible-icon {
+  transition: transform 0.2s ease;
+  color: #2563eb;
+}
+
+.products-collapsible[open] .collapsible-icon {
+  transform: rotate(180deg);
+}
+
+.collapse-hint {
+  font-size: 0.78rem;
+  color: #64748b;
+  font-weight: normal;
+}
+
+.products-table-wrapper {
+  overflow-x: auto;
+  padding: 0.5rem 0.75rem 0.75rem 0.75rem;
+}
+
+.products-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  text-align: left;
+}
+
+.products-table th {
+  background: #f8fafc;
+  color: #475569;
+  font-weight: 600;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 2px solid #e2e8f0;
+  text-transform: uppercase;
+  font-size: 0.72rem;
+  letter-spacing: 0.03em;
+}
+
+.products-table td {
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid #f1f5f9;
+  vertical-align: top;
+  line-height: 1.45;
+  color: var(--ink);
+}
+
+.products-table tr:last-child td {
+  border-bottom: none;
+}
+
+.products-table tr:nth-child(even) {
+  background: #fafafa;
+}
+
+.products-table tr:hover {
+  background: #f1f5f9;
+}
+
+.product-name-cell {
+  color: #0f172a;
+  white-space: nowrap;
+}
+
+.product-category-tag {
+  display: inline-block;
+  background: #e0f2fe;
+  color: #0369a1;
+  border: 1px solid #bae6fd;
+  border-radius: 4px;
+  padding: 0.15rem 0.45rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.product-context-cell {
+  color: #334155;
+}
+
+.no-products-note {
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background: #ffffff;
+  border: 1px dashed #cbd5e1;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  color: #64748b;
+}
+
 /* PDF Rendering & Page-Break Safety Rules */
 .pdf-rendering {
   max-width: 800px !important;
   margin: 0 auto !important;
   background: white !important;
+}
+
+.pdf-rendering details.products-collapsible {
+  display: block !important;
+}
+
+.pdf-rendering .collapse-hint {
+  display: none !important;
 }
 
 .chart-section,
@@ -980,6 +1119,8 @@ button:hover {
 .perplexity-analysis-card,
 .risk-section,
 .earnings-section,
+.products-collapsible,
+.products-table,
 .result-header {
   page-break-inside: avoid !important;
   break-inside: avoid !important;
