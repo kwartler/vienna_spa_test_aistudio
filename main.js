@@ -14,13 +14,68 @@ const results = document.getElementById('results');
 let currentChart = null;
 let currentResizeObserver = null;
 
+// Cleans API key input by stripping zero-width spaces, leading/trailing whitespace, or pasted surrounding quotes
+function cleanApiKey(key) {
+  if (!key) return '';
+  let cleaned = String(key).replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '').trim();
+  if ((cleaned.startsWith('"') && cleaned.endsWith('"')) || (cleaned.startsWith("'") && cleaned.endsWith("'"))) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  return cleaned;
+}
+
+// Builds headers for OpenRouter API requests with required Bearer token and recommended Referer/Title headers
+function getOpenRouterHeaders(apiKey) {
+  const cleaned = cleanApiKey(apiKey);
+  const origin = typeof window !== 'undefined' && window.location ? window.location.origin : 'https://github.io';
+  return {
+    'Authorization': `Bearer ${cleaned}`,
+    'Content-Type': 'application/json',
+    'HTTP-Referer': origin,
+    'X-Title': 'GenAI Finance App'
+  };
+}
+
+// Auto-restore previously saved keys from localStorage on page load
+document.addEventListener('DOMContentLoaded', () => {
+  try {
+    const savedTwelve = localStorage.getItem('twelvedata_key');
+    const savedNews = localStorage.getItem('newsdata_key');
+    const savedOpenRouter = localStorage.getItem('openrouter_key');
+
+    if (savedTwelve) {
+      const el = document.getElementById('twelvedata-key');
+      if (el && !el.value) el.value = savedTwelve;
+    }
+    if (savedNews) {
+      const el = document.getElementById('newsdata-key');
+      if (el && !el.value) el.value = savedNews;
+    }
+    if (savedOpenRouter) {
+      const el = document.getElementById('openrouter-key');
+      if (el && !el.value) el.value = savedOpenRouter;
+    }
+  } catch {
+    // LocalStorage unavailable in restricted environment
+  }
+});
+
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
 
   const ticker = document.getElementById('ticker').value.trim().toUpperCase();
-  const twelveDataKey = document.getElementById('twelvedata-key').value.trim();
-  const newsDataKey = document.getElementById('newsdata-key')?.value.trim() || '';
-  const openRouterKey = document.getElementById('openrouter-key').value.trim();
+  const twelveDataKey = cleanApiKey(document.getElementById('twelvedata-key').value);
+  const newsDataKey = cleanApiKey(document.getElementById('newsdata-key')?.value || '');
+  const openRouterKey = cleanApiKey(document.getElementById('openrouter-key').value);
+
+  // Auto-save keys to localStorage for convenience
+  try {
+    if (twelveDataKey) localStorage.setItem('twelvedata_key', twelveDataKey);
+    if (newsDataKey) localStorage.setItem('newsdata_key', newsDataKey);
+    if (openRouterKey) localStorage.setItem('openrouter_key', openRouterKey);
+  } catch {
+    // Ignore storage errors
+  }
 
   // Clean up previous chart if active
   if (currentChart) {
@@ -48,28 +103,36 @@ form.addEventListener('submit', async (event) => {
       }
     }
 
+    // Fetch latest global risk alerts from Riskline endpoint
+    const risklineAlerts = await fetchRisklineAlerts();
+
     let note = null;
     let perplexityAnalysis = null;
+    let riskAnalysis = { hasRisks: false, riskSummary: null };
 
     if (openRouterKey) {
-      // Step 1: Run Perplexity Sonar web search analysis on news headlines first
-      if (newsHeadlines && newsHeadlines.length > 0) {
-        try {
-          perplexityAnalysis = await getPerplexityNewsAnalysis(ticker, newsHeadlines, openRouterKey, companyName);
-        } catch (err) {
-          perplexityAnalysis = `Perplexity Analysis unavailable: ${err.message}`;
-        }
-      }
+      // Step 1: Run Perplexity Sonar web search analysis & Flash-Lite risk check in parallel
+      const [perpResult, riskResult] = await Promise.all([
+        (newsHeadlines && newsHeadlines.length > 0)
+          ? getPerplexityNewsAnalysis(ticker, newsHeadlines, openRouterKey, companyName).catch(err => `Perplexity Analysis unavailable: ${err.message}`)
+          : Promise.resolve(null),
+        risklineAlerts
+          ? checkCompanyRisksWithFlashLite(ticker, companyName, risklineAlerts, openRouterKey)
+          : Promise.resolve({ hasRisks: false, riskSummary: null })
+      ]);
 
-      // Step 2: Pass stock data, MACD, RSI, news headlines, and Perplexity SWOT analysis into getResearchNote
+      perplexityAnalysis = perpResult;
+      riskAnalysis = riskResult || { hasRisks: false, riskSummary: null };
+
+      // Step 2: Pass stock data, indicators, news, Perplexity SWOT, and Riskline risks into getResearchNote
       try {
-        note = await getResearchNote(ticker, priceData, openRouterKey, newsHeadlines, companyName, perplexityAnalysis);
+        note = await getResearchNote(ticker, priceData, openRouterKey, newsHeadlines, companyName, perplexityAnalysis, riskAnalysis);
       } catch (err) {
         note = `AI Note unavailable: ${err.message}`;
       }
     }
 
-    renderResults(ticker, priceData, note, newsHeadlines, newsError, companyName, perplexityAnalysis);
+    renderResults(ticker, priceData, note, newsHeadlines, newsError, companyName, perplexityAnalysis, riskAnalysis);
   } catch (err) {
     results.innerHTML = `<p class="error">Something went wrong: ${err.message}</p>`;
   }
@@ -324,7 +387,7 @@ function formatMarkdownOrText(text) {
 
 // OpenRouter call. The price data and technical indicators are summarized and handed to the model
 // so the research note reflects the actual numbers fetched and calculated.
-async function getResearchNote(ticker, priceData, apiKey, newsHeadlines = null, companyName = '', perplexityAnalysis = null) {
+async function getResearchNote(ticker, priceData, apiKey, newsHeadlines = null, companyName = '', perplexityAnalysis = null, riskAnalysis = null) {
   const first = priceData[0];
   const latest = priceData[priceData.length - 1];
   const previous = priceData.length > 1 ? priceData[priceData.length - 2] : null;
@@ -352,6 +415,11 @@ async function getResearchNote(ticker, priceData, apiKey, newsHeadlines = null, 
     }
   }
 
+  let riskContext = '';
+  if (riskAnalysis && riskAnalysis.hasRisks && riskAnalysis.riskSummary) {
+    riskContext = '\n\nIdentified Recent Riskline Geopolitical/Security Alerts Impacting Company:\n' + riskAnalysis.riskSummary;
+  }
+
   const subjectName = companyName ? `${companyName} (${ticker})` : ticker;
 
   const summary = `
@@ -369,26 +437,23 @@ Financial & Technical Market Data for ${subjectName}:
   * Relative Strength Index (RSI 14): ${rsiVal} (${latest.rsi !== null ? (latest.rsi >= 70 ? 'Overbought signal > 70' : latest.rsi <= 30 ? 'Oversold signal < 30' : 'Neutral territory 30-70') : 'N/A'})
   * MACD Line (12,26): ${macdVal}
   * MACD Signal Line (9): ${signalVal}
-  * MACD Histogram: ${histVal} (${latest.histogram !== null ? (latest.histogram >= 0 ? 'Bullish momentum (histogram >= 0)' : 'Bearish momentum (histogram < 0)') : 'N/A'})${newsContext}${perplexityContext}
+  * MACD Histogram: ${histVal} (${latest.histogram !== null ? (latest.histogram >= 0 ? 'Bullish momentum (histogram >= 0)' : 'Bearish momentum (histogram < 0)') : 'N/A'})${newsContext}${perplexityContext}${riskContext}
   `;
 
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json'
-    },
+    headers: getOpenRouterHeaders(apiKey),
     body: JSON.stringify({
       model: 'openai/gpt-4o-mini',
       max_tokens: 1000,
       messages: [
         {
           role: 'system',
-          content: 'You are a professional financial research analyst. Write a concise, insightful research note analyzing the provided ticker data. Synthesize price trends, single-day session action, technical indicators (RSI & MACD), news headlines, and the Perplexity Sonar SWOT analysis into actionable insights.'
+          content: 'You are a professional financial research analyst. Write a concise, insightful research note analyzing the provided ticker data. Synthesize price trends, single-day session action, technical indicators (RSI & MACD), news headlines, Perplexity SWOT analysis, and Riskline alerts into actionable insights.'
         },
         {
           role: 'user',
-          content: `${summary}\n\nIMPORTANT FORMATTING INSTRUCTION:\nOn the very first line of your response, output an overall signal rating tag in the exact format:\nRATING: BUY\nor\nRATING: NEUTRAL\nor\nRATING: SELL\n(Use SELL for definite sell signals, NEUTRAL for hold/neutral, BUY for bullish signals).\n\nThen add a blank line and write your two-paragraph AI Research Note for ${subjectName} synthesizing stock price performance, technical signals (RSI/MACD), news headlines, and the Perplexity SWOT implications.`
+          content: `${summary}\n\nIMPORTANT FORMATTING INSTRUCTION:\nOn the very first line of your response, output an overall signal rating tag in the exact format:\nRATING: BUY\nor\nRATING: NEUTRAL\nor\nRATING: SELL\n(Use SELL for definite sell signals, NEUTRAL for hold/neutral, BUY for bullish signals).\n\nThen add a blank line and write your two-paragraph AI Research Note for ${subjectName} synthesizing stock price performance, technical signals (RSI/MACD), news headlines, Perplexity SWOT implications, and Riskline risks.`
         }
       ]
     })
@@ -427,10 +492,7 @@ If these headlines and news impact the stock, provide a bulleted list of SWOT wi
 
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json'
-    },
+    headers: getOpenRouterHeaders(apiKey),
     body: JSON.stringify({
       model: 'perplexity/sonar',
       max_tokens: 1000,
@@ -456,6 +518,112 @@ If these headlines and news impact the stock, provide a bulleted list of SWOT wi
     content: rawContent,
     citations: citations
   };
+}
+
+/**
+ * Fetches latest risk and security alerts from Riskline endpoint.
+ * GET https://api.riskline.com/alerts/latest.json
+ */
+async function fetchRisklineAlerts() {
+  try {
+    const response = await fetch('https://api.riskline.com/alerts/latest.json');
+    if (!response.ok) return null;
+    const data = await response.json();
+    return data;
+  } catch (err) {
+    console.warn('Failed to fetch Riskline alerts:', err);
+    return null;
+  }
+}
+
+/**
+ * Sends Riskline alerts to a small flash-lite model (google/gemini-2.0-flash-lite-001) via OpenRouter
+ * to determine if any alerts present risks or impacts to the given company/ticker.
+ */
+async function checkCompanyRisksWithFlashLite(ticker, companyName, alertsData, apiKey) {
+  if (!apiKey || !alertsData) {
+    return { hasRisks: false, riskSummary: null };
+  }
+
+  let rawAlerts = [];
+  if (Array.isArray(alertsData)) {
+    rawAlerts = alertsData;
+  } else if (alertsData && typeof alertsData === 'object') {
+    rawAlerts = alertsData.alerts || alertsData.data || alertsData.items || [alertsData];
+  }
+
+  if (rawAlerts.length === 0) {
+    return { hasRisks: false, riskSummary: null };
+  }
+
+  const subjectName = companyName ? `${companyName} (${ticker})` : ticker;
+
+  const formattedAlerts = rawAlerts.slice(0, 25).map((a, idx) => {
+    const title = a.title || a.headline || a.summary || 'Risk Alert';
+    const location = a.country || a.location || a.region || a.country_code || '';
+    const category = a.category || a.alert_type || a.type || '';
+    const desc = a.description || a.details || a.text || '';
+    const date = a.created_at || a.date || a.published_at || '';
+    return `Alert #${idx + 1}: ${title}${location ? ` [Location: ${location}]` : ''}${category ? ` [Category: ${category}]` : ''}${date ? ` [Date: ${date}]` : ''}\nDetails: ${desc.slice(0, 250)}`;
+  }).join('\n\n');
+
+  const prompt = `You are a corporate risk and intelligence analyst working for a global financial institution.
+
+Target Subject: ${subjectName}
+
+Here are the latest global risk, travel security, and geopolitical alerts retrieved from Riskline:
+
+${formattedAlerts}
+
+TASK:
+Analyze these alerts to determine if ANY of them pose a plausible direct or indirect risk, operational disruption, supply chain risk, regional asset hazard, market volatility trigger, or executive travel concern for ${subjectName}.
+
+CRITICAL INSTRUCTIONS:
+- If NONE of the alerts present a plausible impact or risk to ${subjectName}, your response MUST start with:
+NO_RISKS_IDENTIFIED
+
+- If one or more alerts DO present plausible risks or impacts to ${subjectName}, provide a bulleted summary of each relevant risk, explaining clearly what the alert is and why/how it impacts ${subjectName}.`;
+
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: getOpenRouterHeaders(apiKey),
+      body: JSON.stringify({
+        model: 'google/gemini-2.0-flash-lite-001',
+        max_tokens: 600,
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a corporate risk analyst. Be concise, accurate, and realistic.'
+          },
+          {
+            role: 'user',
+            content: prompt
+          }
+        ]
+      })
+    });
+
+    if (!response.ok) {
+      console.warn('Flash-Lite model call for risks failed:', response.status);
+      return { hasRisks: false, riskSummary: null };
+    }
+
+    const data = await response.json();
+    const content = data.choices?.[0]?.message?.content?.trim() || '';
+
+    if (content.includes('NO_RISKS_IDENTIFIED') || !content) {
+      return { hasRisks: false, riskSummary: null };
+    }
+
+    return {
+      hasRisks: true,
+      riskSummary: content
+    };
+  } catch (err) {
+    console.warn('Error calling flash-lite model for risks:', err);
+    return { hasRisks: false, riskSummary: null };
+  }
 }
 
 // Pulls the useful part out of an OpenRouter error response: the HTTP status,
@@ -561,7 +729,7 @@ function renderPerplexityAnalysisCard(perplexityAnalysis, newsHeadlines) {
   return `<div class="perplexity-body">${htmlContent}</div>${citationsListHtml}`;
 }
 
-function renderResults(ticker, priceData, note, newsHeadlines = null, newsError = null, companyName = '', perplexityAnalysis = null) {
+function renderResults(ticker, priceData, note, newsHeadlines = null, newsError = null, companyName = '', perplexityAnalysis = null, riskAnalysis = null) {
   const latest = priceData[priceData.length - 1];
   const previous = priceData.length > 1 ? priceData[priceData.length - 2] : null;
 
@@ -769,6 +937,20 @@ function renderResults(ticker, priceData, note, newsHeadlines = null, newsError 
             ${renderPerplexityAnalysisCard(perplexityAnalysis, newsHeadlines)}
           </div>
         ` : ''
+      }
+    </div>
+
+    <div class="note-box risk-section">
+      <div class="risk-header">
+        <h3>Recent Risks</h3>
+        <span class="risk-badge ${riskAnalysis && riskAnalysis.hasRisks ? 'danger' : 'neutral'}">
+          ${riskAnalysis && riskAnalysis.hasRisks ? 'Riskline Warning' : 'Riskline Monitor'}
+        </span>
+      </div>
+      ${
+        riskAnalysis && riskAnalysis.hasRisks && riskAnalysis.riskSummary
+          ? `<div class="risk-body">${formatMarkdownOrText(riskAnalysis.riskSummary)}</div>`
+          : `<p class="no-risks-message">No recent risks identified for ${escapeHtml(ticker)}</p>`
       }
     </div>
 

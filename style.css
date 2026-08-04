@@ -767,6 +767,61 @@ button:hover {
   to { transform: rotate(360deg); }
 }
 
+.risk-section {
+  border-left-color: #d97706;
+  background: #fffdf8;
+}
+
+.risk-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.risk-header h3 {
+  margin: 0;
+  color: #b45309;
+}
+
+.risk-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: 'Menlo', 'Courier New', monospace;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 0.2rem 0.55rem;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.risk-badge.neutral {
+  background: rgba(100, 116, 139, 0.12);
+  color: #475569;
+  border: 1px solid rgba(100, 116, 139, 0.2);
+}
+
+.risk-badge.danger {
+  background: rgba(220, 38, 38, 0.12);
+  color: #dc2626;
+  border: 1px solid rgba(220, 38, 38, 0.3);
+}
+
+.no-risks-message {
+  margin: 0;
+  font-size: 0.92rem;
+  color: #525252;
+  font-style: italic;
+  padding: 0.25rem 0;
+}
+
+.risk-body {
+  font-size: 0.92rem;
+  line-height: 1.6;
+  color: var(--ink);
+}
+
 .app-footer {
   max-width: 640px;
   margin: 0 auto;
