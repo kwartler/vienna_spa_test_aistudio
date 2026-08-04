@@ -6,6 +6,7 @@
 // is ever committed to your public repo or shipped in the source.
 
 import * as echarts from 'echarts';
+import html2pdf from 'html2pdf.js';
 
 const form = document.getElementById('ticker-form');
 const results = document.getElementById('results');
@@ -34,28 +35,41 @@ form.addEventListener('submit', async (event) => {
   results.innerHTML = '<p class="placeholder">Fetching market data, indicators & headlines...</p>';
 
   try {
-    const rawPriceData = await fetchPriceData(ticker, twelveDataKey);
+    const { priceData: rawPriceData, companyName } = await fetchPriceData(ticker, twelveDataKey);
     const priceData = calculateIndicators(rawPriceData);
 
     let newsHeadlines = null;
     let newsError = null;
     if (newsDataKey) {
       try {
-        newsHeadlines = await fetchNewsHeadlines(ticker, newsDataKey);
+        newsHeadlines = await fetchNewsHeadlines(ticker, newsDataKey, companyName);
       } catch (err) {
         newsError = err.message;
       }
     }
 
     let note = null;
+    let perplexityAnalysis = null;
+
     if (openRouterKey) {
+      // Step 1: Run Perplexity Sonar web search analysis on news headlines first
+      if (newsHeadlines && newsHeadlines.length > 0) {
+        try {
+          perplexityAnalysis = await getPerplexityNewsAnalysis(ticker, newsHeadlines, openRouterKey, companyName);
+        } catch (err) {
+          perplexityAnalysis = `Perplexity Analysis unavailable: ${err.message}`;
+        }
+      }
+
+      // Step 2: Pass stock data, MACD, RSI, news headlines, and Perplexity SWOT analysis into getResearchNote
       try {
-        note = await getResearchNote(ticker, priceData, openRouterKey, newsHeadlines);
+        note = await getResearchNote(ticker, priceData, openRouterKey, newsHeadlines, companyName, perplexityAnalysis);
       } catch (err) {
         note = `AI Note unavailable: ${err.message}`;
       }
     }
-    renderResults(ticker, priceData, note, newsHeadlines, newsError);
+
+    renderResults(ticker, priceData, note, newsHeadlines, newsError, companyName, perplexityAnalysis);
   } catch (err) {
     results.innerHTML = `<p class="error">Something went wrong: ${err.message}</p>`;
   }
@@ -81,7 +95,9 @@ async function fetchPriceData(ticker, apiKey) {
   const values = raw.values ?? [];
   if (!values.length) throw new Error(`No price data returned for ${ticker}`);
 
-  return values
+  const companyName = raw.meta?.name || '';
+
+  const priceData = values
     .map((b) => ({
       date: b.datetime,
       open: Number(b.open),
@@ -91,15 +107,31 @@ async function fetchPriceData(ticker, apiKey) {
       volume: Number(b.volume || 0)
     }))
     .sort((a, b) => (a.date < b.date ? -1 : 1));
+
+  return { priceData, companyName };
 }
 
 /**
- * NewsData.io headlines fetcher.
- * GET request: https://newsdata.io/api/1/latest?apikey=YOUR_KEY&q=TICKER
+ * NewsData.io headlines fetcher using the market news endpoint.
+ * GET request: https://newsdata.io/api/1/market?apikey=YOUR_KEY&q="COMPANY"
  */
-async function fetchNewsHeadlines(ticker, apiKey) {
+async function fetchNewsHeadlines(ticker, apiKey, companyName = '') {
   if (!apiKey) return null;
-  const url = `https://newsdata.io/api/1/latest?apikey=${encodeURIComponent(apiKey)}&q=${encodeURIComponent(ticker)}&language=en`;
+
+  let query = ticker;
+  if (companyName) {
+    const cleanName = companyName
+      .replace(/\b(Inc\.?|Corporation|Corp\.?|Co\.?|Ltd\.?|LLC|Class\s+[A-Z0-9]+|Common\s+Stock|ADR|Plc|Group|Holdings|N\.?V\.?)\b/gi, '')
+      .replace(/[,.-]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (cleanName && cleanName.length > 1) {
+      query = `"${cleanName}"`;
+    }
+  }
+
+  const url = `https://newsdata.io/api/1/market?apikey=${encodeURIComponent(apiKey)}&q=${encodeURIComponent(query)}&language=en&prioritydomain=top`;
   const response = await fetch(url);
 
   const body = await response.text();
@@ -242,7 +274,7 @@ function calculateIndicators(priceData) {
   }));
 }
 
-// Helper to format basic markdown (bold, italic, list items, paragraphs) into clean HTML
+// Helper to format basic markdown (bold, italic, headers, list items, paragraphs) into clean HTML
 function formatMarkdownOrText(text) {
   if (!text) return '';
   let html = text
@@ -259,7 +291,16 @@ function formatMarkdownOrText(text) {
 
   for (let line of lines) {
     const trimmed = line.trim();
-    if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+    if (trimmed.startsWith('### ')) {
+      if (inList) { result += '</ul>'; inList = false; }
+      result += `<h4>${trimmed.substring(4)}</h4>`;
+    } else if (trimmed.startsWith('## ')) {
+      if (inList) { result += '</ul>'; inList = false; }
+      result += `<h3>${trimmed.substring(3)}</h3>`;
+    } else if (trimmed.startsWith('# ')) {
+      if (inList) { result += '</ul>'; inList = false; }
+      result += `<h2>${trimmed.substring(2)}</h2>`;
+    } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
       if (!inList) {
         result += '<ul>';
         inList = true;
@@ -283,7 +324,7 @@ function formatMarkdownOrText(text) {
 
 // OpenRouter call. The price data and technical indicators are summarized and handed to the model
 // so the research note reflects the actual numbers fetched and calculated.
-async function getResearchNote(ticker, priceData, apiKey, newsHeadlines = null) {
+async function getResearchNote(ticker, priceData, apiKey, newsHeadlines = null, companyName = '', perplexityAnalysis = null) {
   const first = priceData[0];
   const latest = priceData[priceData.length - 1];
   const previous = priceData.length > 1 ? priceData[priceData.length - 2] : null;
@@ -303,8 +344,18 @@ async function getResearchNote(ticker, priceData, apiKey, newsHeadlines = null) 
       newsHeadlines.slice(0, 5).map(h => `- ${h.title} (${h.source})`).join('\n');
   }
 
+  let perplexityContext = '';
+  if (perplexityAnalysis) {
+    const perpText = typeof perplexityAnalysis === 'string' ? perplexityAnalysis : perplexityAnalysis.content;
+    if (perpText) {
+      perplexityContext = '\n\nPerplexity Headlines Implication & SWOT Analysis:\n' + perpText;
+    }
+  }
+
+  const subjectName = companyName ? `${companyName} (${ticker})` : ticker;
+
   const summary = `
-Financial & Technical Market Data for ${ticker}:
+Financial & Technical Market Data for ${subjectName}:
 - Date Range Analyzed: ${first.date} to ${latest.date} (${priceData.length} trading days)
 - Overall Range Performance: Start $${first.close.toFixed(2)} -> Latest $${latest.close.toFixed(2)} (${pctChange >= 0 ? '+' : ''}${pctChange.toFixed(2)}%)
 - Latest Session (${latest.date}):
@@ -318,7 +369,7 @@ Financial & Technical Market Data for ${ticker}:
   * Relative Strength Index (RSI 14): ${rsiVal} (${latest.rsi !== null ? (latest.rsi >= 70 ? 'Overbought signal > 70' : latest.rsi <= 30 ? 'Oversold signal < 30' : 'Neutral territory 30-70') : 'N/A'})
   * MACD Line (12,26): ${macdVal}
   * MACD Signal Line (9): ${signalVal}
-  * MACD Histogram: ${histVal} (${latest.histogram !== null ? (latest.histogram >= 0 ? 'Bullish momentum (histogram >= 0)' : 'Bearish momentum (histogram < 0)') : 'N/A'})${newsContext}
+  * MACD Histogram: ${histVal} (${latest.histogram !== null ? (latest.histogram >= 0 ? 'Bullish momentum (histogram >= 0)' : 'Bearish momentum (histogram < 0)') : 'N/A'})${newsContext}${perplexityContext}
   `;
 
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -333,11 +384,11 @@ Financial & Technical Market Data for ${ticker}:
       messages: [
         {
           role: 'system',
-          content: 'You are a professional financial research analyst. Write a concise, insightful research note analyzing the provided ticker data. Synthesize price trends, single-day session action, RSI levels, MACD momentum signals, and news headlines (if provided) into actionable insights.'
+          content: 'You are a professional financial research analyst. Write a concise, insightful research note analyzing the provided ticker data. Synthesize price trends, single-day session action, technical indicators (RSI & MACD), news headlines, and the Perplexity Sonar SWOT analysis into actionable insights.'
         },
         {
           role: 'user',
-          content: `${summary}\n\nWrite a two-paragraph AI Research Note for ${ticker} based on this dataset.`
+          content: `${summary}\n\nIMPORTANT FORMATTING INSTRUCTION:\nOn the very first line of your response, output an overall signal rating tag in the exact format:\nRATING: BUY\nor\nRATING: NEUTRAL\nor\nRATING: SELL\n(Use SELL for definite sell signals, NEUTRAL for hold/neutral, BUY for bullish signals).\n\nThen add a blank line and write your two-paragraph AI Research Note for ${subjectName} synthesizing stock price performance, technical signals (RSI/MACD), news headlines, and the Perplexity SWOT implications.`
         }
       ]
     })
@@ -346,6 +397,65 @@ Financial & Technical Market Data for ${ticker}:
   if (!response.ok) throw new Error(`OpenRouter call failed. ${await readOpenRouterError(response)}`);
   const data = await response.json();
   return data.choices?.[0]?.message?.content ?? 'No response returned from model.';
+}
+
+// OpenRouter call using perplexity/sonar to analyze news headlines & perform web search
+async function getPerplexityNewsAnalysis(ticker, newsHeadlines, apiKey, companyName = '') {
+  if (!apiKey || !newsHeadlines || newsHeadlines.length === 0) return null;
+
+  const subjectName = companyName ? `${companyName} (${ticker})` : ticker;
+  const headlinesFormatted = newsHeadlines
+    .map((h, i) => `${i + 1}. "${h.title}" (Source: ${h.source}${h.pubDate ? `, Date: ${h.pubDate}` : ''})${h.description ? ` - ${h.description}` : ''}`)
+    .join('\n');
+
+  const prompt = `Target Company: ${subjectName}
+
+Here are the current market news headlines retrieved for the company:
+${headlinesFormatted}
+
+Please perform a real-time web search and provide:
+
+### Implication of Headlines on the Company
+Write a clear, thorough narrative analyzing how these recent news headlines and current developments specifically impact or may impact ${subjectName}, its business operations, financial drivers, and stock sentiment. Include inline bracket citations (e.g. [1], [2], [6]) referencing the source articles.
+
+### SWOT Analysis
+If these headlines and news impact the stock, provide a bulleted list of SWOT with exactly ONE bullet point for each category, directly tied to how current news/events affect the company:
+- **Strength**: (one bullet point)
+- **Weakness**: (one bullet point)
+- **Opportunity**: (one bullet point)
+- **Threat**: (one bullet point)`;
+
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: 'perplexity/sonar',
+      max_tokens: 1000,
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a senior equity research analyst and market intelligence expert with real-time web search capability. Use inline bracket citations like [1], [2], [6] when referencing facts from sources.'
+        },
+        {
+          role: 'user',
+          content: prompt
+        }
+      ]
+    })
+  });
+
+  if (!response.ok) throw new Error(`OpenRouter Perplexity call failed. ${await readOpenRouterError(response)}`);
+  const data = await response.json();
+  const rawContent = data.choices?.[0]?.message?.content ?? 'No analysis returned from Perplexity.';
+  const citations = data.citations || data.choices?.[0]?.citations || data.choices?.[0]?.message?.citations || [];
+
+  return {
+    content: rawContent,
+    citations: citations
+  };
 }
 
 // Pulls the useful part out of an OpenRouter error response: the HTTP status,
@@ -372,9 +482,110 @@ async function readOpenRouterError(response) {
   return [`(HTTP ${response.status})`, hint, message].filter(Boolean).join(' ');
 }
 
-function renderResults(ticker, priceData, note, newsHeadlines = null, newsError = null) {
+// Formats Perplexity output with interactive citation links and sources list
+function renderPerplexityAnalysisCard(perplexityAnalysis, newsHeadlines) {
+  if (!perplexityAnalysis) {
+    return `<p class="note-placeholder"><em>Provide an OpenRouter API Key in the form above to generate Perplexity Sonar news implications and SWOT analysis.</em></p>`;
+  }
+
+  let text = '';
+  let citations = [];
+
+  if (typeof perplexityAnalysis === 'string') {
+    text = perplexityAnalysis;
+  } else if (typeof perplexityAnalysis === 'object') {
+    text = perplexityAnalysis.content || '';
+    citations = perplexityAnalysis.citations || [];
+  }
+
+  function getCitationUrl(num) {
+    const idx = num - 1;
+    if (Array.isArray(citations) && citations[idx] && typeof citations[idx] === 'string') {
+      return citations[idx];
+    }
+    if (Array.isArray(newsHeadlines) && newsHeadlines[idx] && newsHeadlines[idx].link) {
+      return newsHeadlines[idx].link;
+    }
+    return null;
+  }
+
+  let htmlContent = formatMarkdownOrText(text);
+
+  // First handle multi/comma citations e.g. [1, 2] or [2, 6]
+  htmlContent = htmlContent.replace(/\[(\d+(?:\s*,\s*\d+)+)\]/g, (match, group) => {
+    const nums = group.split(',').map(s => s.trim());
+    return nums.map(nStr => {
+      const num = parseInt(nStr, 10);
+      const url = getCitationUrl(num);
+      if (url) {
+        return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" class="perplexity-citation-link" title="Open citation [${num}] in new tab">[${num}]</a>`;
+      }
+      return `<span class="perplexity-citation-tag">[${num}]</span>`;
+    }).join('');
+  });
+
+  // Next handle single or adjacent citations e.g. [1] or [2][6]
+  htmlContent = htmlContent.replace(/\[(\d+)\]/g, (match, numStr) => {
+    const num = parseInt(numStr, 10);
+    const url = getCitationUrl(num);
+    if (url) {
+      return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" class="perplexity-citation-link" title="Open citation [${num}] in new tab">[${num}]</a>`;
+    }
+    return `<span class="perplexity-citation-tag">[${num}]</span>`;
+  });
+
+  let citationsListHtml = '';
+  const effectiveCitations = (citations && citations.length > 0)
+    ? citations
+    : (newsHeadlines || []).map(h => h.link).filter(Boolean);
+
+  if (effectiveCitations && effectiveCitations.length > 0) {
+    const itemsHtml = effectiveCitations.map((url, idx) => {
+      let domain = url;
+      try {
+        domain = new URL(url).hostname.replace(/^www\./, '');
+      } catch {
+        // Fallback
+      }
+      return `<li><span class="citation-num">[${idx + 1}]</span> <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" class="perplexity-source-link">${escapeHtml(domain)} <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg></a></li>`;
+    }).join('');
+
+    citationsListHtml = `
+      <div class="perplexity-sources-box">
+        <h5>Search Sources & Citations</h5>
+        <ul class="perplexity-sources-list">${itemsHtml}</ul>
+      </div>
+    `;
+  }
+
+  return `<div class="perplexity-body">${htmlContent}</div>${citationsListHtml}`;
+}
+
+function renderResults(ticker, priceData, note, newsHeadlines = null, newsError = null, companyName = '', perplexityAnalysis = null) {
   const latest = priceData[priceData.length - 1];
   const previous = priceData.length > 1 ? priceData[priceData.length - 2] : null;
+
+  let rating = 'NEUTRAL';
+  let cleanedNote = note;
+
+  if (note) {
+    const ratingMatch = note.match(/RATING:\s*(BUY|NEUTRAL|SELL)/i);
+    if (ratingMatch) {
+      rating = ratingMatch[1].toUpperCase();
+      cleanedNote = note.replace(/RATING:\s*(BUY|NEUTRAL|SELL)\s*/i, '').trim();
+    } else {
+      if (/definite sell|strong sell|sell signal|\bsell\b/i.test(note)) rating = 'SELL';
+      else if (/strong buy|buy signal|\bbuy\b/i.test(note)) rating = 'BUY';
+    }
+  } else if (priceData && priceData.length > 0) {
+    const latestBar = priceData[priceData.length - 1];
+    if (latestBar && latestBar.rsi !== null && latestBar.histogram !== null) {
+      if (latestBar.rsi < 38 && latestBar.histogram > 0) rating = 'BUY';
+      else if (latestBar.rsi > 65 && latestBar.histogram < 0) rating = 'SELL';
+    }
+  }
+
+  const headerTitle = companyName ? `${ticker} (${companyName})` : ticker;
 
   const dollarChange = previous ? latest.close - previous.close : latest.close - latest.open;
   const percentChange = previous ? (dollarChange / previous.close) * 100 : ((latest.close - latest.open) / latest.open) * 100;
@@ -431,11 +642,11 @@ function renderResults(ticker, priceData, note, newsHeadlines = null, newsError 
       </div>`
     : newsError
       ? `<p class="error-text">Could not fetch news headlines: ${escapeHtml(newsError)}</p>`
-      : `<p class="note-placeholder"><em>Provide a NewsData.io API Key in the form above to fetch market headlines for ${ticker}.</em></p>`;
+      : `<p class="note-placeholder"><em>Provide a NewsData.io API Key in the form above to fetch market headlines for ${escapeHtml(ticker)}.</em></p>`;
 
   results.innerHTML = `
     <div class="result-header">
-      <h2>${ticker} OHLC & Indicator Analysis</h2>
+      <h2>${escapeHtml(headerTitle)} OHLC & Indicator Analysis</h2>
       <span class="latest-date">Latest Session: ${latest.date}</span>
     </div>
 
@@ -544,21 +755,91 @@ function renderResults(ticker, priceData, note, newsHeadlines = null, newsError 
     </div>
 
     <div class="news-section">
-      <h3>Latest News Headlines for ${ticker}</h3>
+      <h3>Latest News Headlines for ${escapeHtml(ticker)}</h3>
+      <p class="news-endpoint-subtitle"><em>Retrieved from https://newsdata.io/api/1/market endpoint (filtered by top priority domains: prioritydomain=top)</em></p>
       ${newsContentHtml}
+
+      ${
+        newsHeadlines && newsHeadlines.length > 0 ? `
+          <div class="perplexity-analysis-card">
+            <div class="perplexity-header">
+              <h4>Implication of Headlines on the Company</h4>
+              <span class="perplexity-badge">Perplexity Sonar Web Search</span>
+            </div>
+            ${renderPerplexityAnalysisCard(perplexityAnalysis, newsHeadlines)}
+          </div>
+        ` : ''
+      }
     </div>
 
     <div class="note-box">
       <h3>AI Research Note</h3>
+      <div class="traffic-light-pill traffic-${rating.toLowerCase()}">
+        <div class="traffic-lights">
+          <span class="light red ${rating === 'SELL' ? 'active' : ''}" title="Red: Definite SELL Signal"></span>
+          <span class="light yellow ${rating === 'NEUTRAL' ? 'active' : ''}" title="Yellow: NEUTRAL Signal"></span>
+          <span class="light green ${rating === 'BUY' ? 'active' : ''}" title="Green: BUY Signal"></span>
+        </div>
+        <span class="traffic-label">${rating === 'SELL' ? 'SELL SIGNAL' : rating === 'BUY' ? 'BUY SIGNAL' : 'NEUTRAL / HOLD'}</span>
+      </div>
       ${
-        note
-          ? `<div class="note-body">${formatMarkdownOrText(note)}</div>`
+        cleanedNote
+          ? `<div class="note-body">${formatMarkdownOrText(cleanedNote)}</div>`
           : `<p class="note-placeholder"><em>Provide an OpenRouter API Key in the form above to generate an automated AI Research Note analyzing OHLC, MACD, RSI data, and headlines.</em></p>`
       }
+    </div>
+
+    <div class="pdf-download-container" data-html2canvas-ignore="true">
+      <button type="button" id="download-pdf-btn" class="download-pdf-btn">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+          <polyline points="7 10 12 15 17 10"></polyline>
+          <line x1="12" y1="15" x2="12" y2="3"></line>
+        </svg>
+        Download Research Note PDF
+      </button>
     </div>
   `;
 
   initCandlestickChart(priceData);
+  initPdfDownload(ticker);
+}
+
+function initPdfDownload(ticker) {
+  const downloadBtn = document.getElementById('download-pdf-btn');
+  if (!downloadBtn) return;
+
+  downloadBtn.addEventListener('click', async () => {
+    const originalHtml = downloadBtn.innerHTML;
+    downloadBtn.disabled = true;
+    downloadBtn.innerHTML = `
+      <svg class="spin-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10" stroke-opacity="0.25"></circle>
+        <path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"></path>
+      </svg>
+      Generating PDF Report...
+    `;
+
+    try {
+      const element = document.getElementById('results');
+      const dateStr = new Date().toISOString().split('T')[0];
+      const opt = {
+        margin: [0.35, 0.4, 0.4, 0.4],
+        filename: `${ticker}_Research_Report_${dateStr}.pdf`,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true, logging: false },
+        jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' }
+      };
+
+      await html2pdf().set(opt).from(element).save();
+    } catch (err) {
+      console.error('Failed to generate PDF:', err);
+      alert('Could not download PDF: ' + err.message);
+    } finally {
+      downloadBtn.disabled = false;
+      downloadBtn.innerHTML = originalHtml;
+    }
+  });
 }
 
 function initCandlestickChart(priceData) {

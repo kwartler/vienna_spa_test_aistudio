@@ -296,6 +296,71 @@ body {
   letter-spacing: 0.05em;
 }
 
+.traffic-light-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.35rem 0.85rem;
+  border-radius: 20px;
+  margin-bottom: 0.9rem;
+  font-family: 'Menlo', 'Courier New', monospace;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  transition: all 0.2s ease;
+}
+
+.traffic-lights {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.traffic-lights .light {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #cbd5e1;
+  opacity: 0.3;
+  transition: all 0.25s ease;
+}
+
+.traffic-lights .light.red.active {
+  background: #ef4444;
+  opacity: 1;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.85);
+}
+
+.traffic-lights .light.yellow.active {
+  background: #eab308;
+  opacity: 1;
+  box-shadow: 0 0 8px rgba(234, 179, 8, 0.85);
+}
+
+.traffic-lights .light.green.active {
+  background: #22c55e;
+  opacity: 1;
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.85);
+}
+
+.traffic-sell {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: #dc2626;
+}
+
+.traffic-neutral {
+  background: rgba(234, 179, 8, 0.12);
+  border: 1px solid rgba(234, 179, 8, 0.4);
+  color: #b45309;
+}
+
+.traffic-buy {
+  background: rgba(34, 197, 94, 0.12);
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  color: #15803d;
+}
+
 .note-body {
   font-size: 0.92rem;
   line-height: 1.6;
@@ -426,10 +491,16 @@ button:hover {
 }
 
 .news-section h3 {
-  margin: 0 0 0.75rem;
+  margin: 0 0 0.5rem;
   font-size: 1.1rem;
   border-bottom: 1px solid var(--line);
   padding-bottom: 0.5rem;
+}
+
+.news-endpoint-subtitle {
+  font-size: 0.82rem;
+  color: #8a8577;
+  margin: -0.25rem 0 0.75rem;
 }
 
 .news-grid {
@@ -496,6 +567,204 @@ button:hover {
   color: var(--error);
   font-size: 0.88rem;
   margin: 0;
+}
+
+.perplexity-analysis-card {
+  margin-top: 1.25rem;
+  background: #fdfbf7;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 4px;
+  padding: 1.2rem;
+}
+
+.perplexity-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 0.6rem;
+  margin-bottom: 0.85rem;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.perplexity-header h4 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.perplexity-badge {
+  font-family: 'Menlo', 'Courier New', monospace;
+  font-size: 0.72rem;
+  background: rgba(27, 122, 58, 0.1);
+  color: var(--accent);
+  padding: 0.2rem 0.5rem;
+  border-radius: 3px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.perplexity-body {
+  font-size: 0.92rem;
+  line-height: 1.6;
+  color: #38352e;
+}
+
+.perplexity-body h4 {
+  margin: 1rem 0 0.4rem;
+  font-size: 0.98rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.perplexity-body h4:first-child {
+  margin-top: 0;
+}
+
+.perplexity-body p {
+  margin: 0 0 0.75rem;
+}
+
+.perplexity-body ul {
+  margin: 0.5rem 0 0.85rem;
+  padding-left: 1.25rem;
+}
+
+.perplexity-body li {
+  margin-bottom: 0.45rem;
+}
+
+.perplexity-body strong {
+  color: var(--ink);
+}
+
+.perplexity-citation-link {
+  color: var(--accent);
+  font-weight: 700;
+  text-decoration: none;
+  font-size: 0.85em;
+  vertical-align: super;
+  padding: 0 2px;
+  margin: 0 1px;
+  border-radius: 2px;
+  background: rgba(27, 122, 58, 0.08);
+  transition: all 0.15s ease;
+}
+
+.perplexity-citation-link:hover {
+  text-decoration: underline;
+  background: rgba(27, 122, 58, 0.2);
+  color: #115e2b;
+}
+
+.perplexity-citation-tag {
+  color: #8a8577;
+  font-weight: 600;
+  font-size: 0.85em;
+  vertical-align: super;
+}
+
+.perplexity-sources-box {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px dashed var(--line);
+}
+
+.perplexity-sources-box h5 {
+  margin: 0 0 0.5rem 0;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #8a8577;
+  font-weight: 700;
+}
+
+.perplexity-sources-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.9rem;
+  font-size: 0.8rem;
+}
+
+.perplexity-sources-list li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.perplexity-sources-list .citation-num {
+  font-family: 'Menlo', 'Courier New', monospace;
+  font-size: 0.75rem;
+  color: #8a8577;
+  font-weight: 600;
+}
+
+.perplexity-source-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.perplexity-source-link:hover {
+  text-decoration: underline;
+}
+
+.pdf-download-container {
+  margin-top: 1.25rem;
+  margin-bottom: 1.5rem;
+  display: flex;
+  justify-content: flex-start;
+}
+
+.download-pdf-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  background: var(--ink);
+  color: #fff;
+  border: 1px solid var(--ink);
+  padding: 0.65rem 1.25rem;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.06);
+}
+
+.download-pdf-btn:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(27, 122, 58, 0.2);
+}
+
+.download-pdf-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.download-pdf-btn:disabled {
+  opacity: 0.7;
+  cursor: wait;
+}
+
+.spin-icon {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 .app-footer {
