@@ -1331,15 +1331,51 @@ function initPdfDownload(ticker) {
       Generating PDF Report...
     `;
 
+    const element = document.getElementById('results');
+
     try {
-      const element = document.getElementById('results');
+      if (currentChart) {
+        currentChart.resize();
+      }
+
+      if (element) {
+        element.classList.add('pdf-rendering');
+      }
+
       const dateStr = new Date().toISOString().split('T')[0];
       const opt = {
-        margin: [0.35, 0.4, 0.4, 0.4],
+        margin: [0.4, 0.4, 0.4, 0.4],
         filename: `${ticker}_Research_Report_${dateStr}.pdf`,
         image: { type: 'jpeg', quality: 0.98 },
-        html2canvas: { scale: 2, useCORS: true, logging: false },
-        jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' }
+        html2canvas: {
+          scale: 2,
+          useCORS: true,
+          logging: false,
+          scrollX: 0,
+          scrollY: 0,
+          windowWidth: document.documentElement.offsetWidth || 1200
+        },
+        jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' },
+        pagebreak: {
+          mode: ['avoid-all', 'css', 'legacy'],
+          avoid: [
+            '.chart-section',
+            '.ohlc-hero',
+            '.ohlc-grid',
+            '.history-section',
+            '.note-box',
+            '.news-section',
+            '.news-card',
+            '.perplexity-analysis-card',
+            '.risk-section',
+            '.earnings-section',
+            '.result-header',
+            'tr',
+            'p',
+            'li',
+            'h1', 'h2', 'h3', 'h4', 'h5'
+          ]
+        }
       };
 
       await html2pdf().set(opt).from(element).save();
@@ -1347,6 +1383,12 @@ function initPdfDownload(ticker) {
       console.error('Failed to generate PDF:', err);
       alert('Could not download PDF: ' + err.message);
     } finally {
+      if (element) {
+        element.classList.remove('pdf-rendering');
+      }
+      if (currentChart) {
+        currentChart.resize();
+      }
       downloadBtn.disabled = false;
       downloadBtn.innerHTML = originalHtml;
     }

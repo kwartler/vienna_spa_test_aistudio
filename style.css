@@ -957,6 +957,70 @@ button:hover {
   color: var(--ink);
 }
 
+/* PDF Rendering & Page-Break Safety Rules */
+.pdf-rendering {
+  max-width: 800px !important;
+  margin: 0 auto !important;
+  background: white !important;
+}
+
+.chart-section,
+.candlestick-chart-container {
+  position: relative;
+  overflow: hidden !important;
+}
+
+.chart-section,
+.ohlc-hero,
+.ohlc-grid,
+.history-section,
+.note-box,
+.news-section,
+.news-card,
+.perplexity-analysis-card,
+.risk-section,
+.earnings-section,
+.result-header {
+  page-break-inside: avoid !important;
+  break-inside: avoid !important;
+  break-inside: avoid-page !important;
+  page-break-before: auto;
+  page-break-after: auto;
+}
+
+.note-body,
+.perplexity-body,
+.risk-body,
+.earnings-body,
+.note-body p,
+.perplexity-body p,
+.risk-body p,
+.earnings-body p,
+.perplexity-body li,
+.note-body li,
+.news-desc,
+.news-title {
+  page-break-inside: avoid !important;
+  break-inside: avoid !important;
+  break-inside: avoid-page !important;
+}
+
+.ohlc-table tr {
+  page-break-inside: avoid !important;
+  break-inside: avoid !important;
+  break-inside: avoid-page !important;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  page-break-after: avoid !important;
+  break-after: avoid !important;
+  break-after: avoid-page !important;
+}
+
+.pdf-rendering .table-wrapper {
+  overflow-x: visible !important;
+}
+
 .app-footer {
   max-width: 640px;
   margin: 0 auto;
