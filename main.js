@@ -1306,6 +1306,42 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
   }
+
+  const resetBtn = document.getElementById('reset-form-btn');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => {
+      // Clear non-API-key inputs
+      const tickerInput = document.getElementById('ticker');
+      if (tickerInput) tickerInput.value = '';
+
+      for (let i = 1; i <= 4; i++) {
+        const urlInput = document.getElementById(`transcript-url-${i}`);
+        if (urlInput) urlInput.value = '';
+      }
+
+      // Reset speaker/content filter radio to default ('all')
+      const defaultFilterRadio = document.querySelector('input[name="transcript-filter"][value="all"]');
+      if (defaultFilterRadio) defaultFilterRadio.checked = true;
+
+      // Clear state variables and chart instances
+      lastEarningsAnalysis = null;
+
+      if (currentChart) {
+        currentChart.dispose();
+        currentChart = null;
+      }
+      if (currentResizeObserver) {
+        currentResizeObserver.disconnect();
+        currentResizeObserver = null;
+      }
+
+      // Reset results display panel
+      const resultsContainer = document.getElementById('results');
+      if (resultsContainer) {
+        resultsContainer.innerHTML = '<p class="placeholder">Results will appear here once you wire up data fetching and your LLM call.</p>';
+      }
+    });
+  }
 });
 
 // Pulls the useful part out of an OpenRouter error response: the HTTP status,

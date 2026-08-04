@@ -894,8 +894,36 @@ button:hover {
   border-color: var(--ink);
 }
 
-.primary-btn {
+.form-actions-group {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
   margin-top: 1rem;
+  flex-wrap: wrap;
+}
+
+.primary-btn {
+  margin-top: 0;
+}
+
+.reset-btn {
+  margin-top: 0;
+  padding: 0.6rem 1.1rem;
+  background: transparent;
+  color: #a6302c;
+  border: 1px solid rgba(166, 48, 44, 0.4);
+  border-radius: 4px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  width: fit-content;
+}
+
+.reset-btn:hover {
+  background: rgba(166, 48, 44, 0.08);
+  border-color: #a6302c;
+  color: #882420;
 }
 
 .earnings-section {
