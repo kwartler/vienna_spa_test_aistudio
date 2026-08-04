@@ -18,6 +18,7 @@ form.addEventListener('submit', async (event) => {
 
   const ticker = document.getElementById('ticker').value.trim().toUpperCase();
   const twelveDataKey = document.getElementById('twelvedata-key').value.trim();
+  const newsDataKey = document.getElementById('newsdata-key')?.value.trim() || '';
   const openRouterKey = document.getElementById('openrouter-key').value.trim();
 
   // Clean up previous chart if active
@@ -30,21 +31,31 @@ form.addEventListener('submit', async (event) => {
     currentResizeObserver = null;
   }
 
-  results.innerHTML = '<p class="placeholder">Fetching market data & candlestick history...</p>';
+  results.innerHTML = '<p class="placeholder">Fetching market data, indicators & headlines...</p>';
 
   try {
     const rawPriceData = await fetchPriceData(ticker, twelveDataKey);
     const priceData = calculateIndicators(rawPriceData);
 
+    let newsHeadlines = null;
+    let newsError = null;
+    if (newsDataKey) {
+      try {
+        newsHeadlines = await fetchNewsHeadlines(ticker, newsDataKey);
+      } catch (err) {
+        newsError = err.message;
+      }
+    }
+
     let note = null;
     if (openRouterKey) {
       try {
-        note = await getResearchNote(ticker, priceData, openRouterKey);
+        note = await getResearchNote(ticker, priceData, openRouterKey, newsHeadlines);
       } catch (err) {
         note = `AI Note unavailable: ${err.message}`;
       }
     }
-    renderResults(ticker, priceData, note);
+    renderResults(ticker, priceData, note, newsHeadlines, newsError);
   } catch (err) {
     results.innerHTML = `<p class="error">Something went wrong: ${err.message}</p>`;
   }
@@ -80,6 +91,51 @@ async function fetchPriceData(ticker, apiKey) {
       volume: Number(b.volume || 0)
     }))
     .sort((a, b) => (a.date < b.date ? -1 : 1));
+}
+
+/**
+ * NewsData.io headlines fetcher.
+ * GET request: https://newsdata.io/api/1/latest?apikey=YOUR_KEY&q=TICKER
+ */
+async function fetchNewsHeadlines(ticker, apiKey) {
+  if (!apiKey) return null;
+  const url = `https://newsdata.io/api/1/latest?apikey=${encodeURIComponent(apiKey)}&q=${encodeURIComponent(ticker)}&language=en`;
+  const response = await fetch(url);
+
+  const body = await response.text();
+  let raw;
+  try {
+    raw = JSON.parse(body);
+  } catch {
+    throw new Error('Could not parse NewsData.io response.');
+  }
+
+  if (raw.status === 'error' || (raw.results && raw.results.message)) {
+    const errorMsg = raw.results?.message || raw.message || 'NewsData.io request failed';
+    throw new Error(errorMsg);
+  }
+
+  const articles = raw.results ?? [];
+  if (!articles.length) return [];
+
+  return articles.slice(0, 8).map((art) => ({
+    title: art.title || 'Untitled Article',
+    link: art.link || '#',
+    source: art.source_id || art.source_url || 'News',
+    pubDate: art.pubDate || '',
+    description: art.description || art.content || '',
+    imageUrl: art.image_url || null,
+  }));
+}
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
 }
 
 /**
@@ -227,7 +283,7 @@ function formatMarkdownOrText(text) {
 
 // OpenRouter call. The price data and technical indicators are summarized and handed to the model
 // so the research note reflects the actual numbers fetched and calculated.
-async function getResearchNote(ticker, priceData, apiKey) {
+async function getResearchNote(ticker, priceData, apiKey, newsHeadlines = null) {
   const first = priceData[0];
   const latest = priceData[priceData.length - 1];
   const previous = priceData.length > 1 ? priceData[priceData.length - 2] : null;
@@ -240,6 +296,12 @@ async function getResearchNote(ticker, priceData, apiKey) {
   const macdVal = latest.macd !== null ? latest.macd.toFixed(2) : 'N/A';
   const signalVal = latest.signal !== null ? latest.signal.toFixed(2) : 'N/A';
   const histVal = latest.histogram !== null ? latest.histogram.toFixed(2) : 'N/A';
+
+  let newsContext = '';
+  if (newsHeadlines && newsHeadlines.length > 0) {
+    newsContext = '\n\nRecent Market Headlines:\n' +
+      newsHeadlines.slice(0, 5).map(h => `- ${h.title} (${h.source})`).join('\n');
+  }
 
   const summary = `
 Financial & Technical Market Data for ${ticker}:
@@ -256,7 +318,7 @@ Financial & Technical Market Data for ${ticker}:
   * Relative Strength Index (RSI 14): ${rsiVal} (${latest.rsi !== null ? (latest.rsi >= 70 ? 'Overbought signal > 70' : latest.rsi <= 30 ? 'Oversold signal < 30' : 'Neutral territory 30-70') : 'N/A'})
   * MACD Line (12,26): ${macdVal}
   * MACD Signal Line (9): ${signalVal}
-  * MACD Histogram: ${histVal} (${latest.histogram !== null ? (latest.histogram >= 0 ? 'Bullish momentum (histogram >= 0)' : 'Bearish momentum (histogram < 0)') : 'N/A'})
+  * MACD Histogram: ${histVal} (${latest.histogram !== null ? (latest.histogram >= 0 ? 'Bullish momentum (histogram >= 0)' : 'Bearish momentum (histogram < 0)') : 'N/A'})${newsContext}
   `;
 
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -271,7 +333,7 @@ Financial & Technical Market Data for ${ticker}:
       messages: [
         {
           role: 'system',
-          content: 'You are a professional financial research analyst. Write a concise, insightful research note analyzing the provided ticker data. Synthesize price trends, single-day session action, RSI levels, and MACD momentum signals into actionable insights.'
+          content: 'You are a professional financial research analyst. Write a concise, insightful research note analyzing the provided ticker data. Synthesize price trends, single-day session action, RSI levels, MACD momentum signals, and news headlines (if provided) into actionable insights.'
         },
         {
           role: 'user',
@@ -310,7 +372,7 @@ async function readOpenRouterError(response) {
   return [`(HTTP ${response.status})`, hint, message].filter(Boolean).join(' ');
 }
 
-function renderResults(ticker, priceData, note) {
+function renderResults(ticker, priceData, note, newsHeadlines = null, newsError = null) {
   const latest = priceData[priceData.length - 1];
   const previous = priceData.length > 1 ? priceData[priceData.length - 2] : null;
 
@@ -353,6 +415,23 @@ function renderResults(ticker, priceData, note) {
       </tr>
     `;
   }).join('');
+
+  const newsContentHtml = newsHeadlines && newsHeadlines.length > 0
+    ? `<div class="news-grid">
+        ${newsHeadlines.map((item) => `
+          <div class="news-card">
+            <div class="news-card-meta">
+              <span class="news-source">${escapeHtml(item.source)}</span>
+              ${item.pubDate ? `<span class="news-date">${escapeHtml(item.pubDate)}</span>` : ''}
+            </div>
+            <a href="${escapeHtml(item.link)}" target="_blank" rel="noopener" class="news-title">${escapeHtml(item.title)}</a>
+            ${item.description ? `<p class="news-desc">${escapeHtml(item.description.length > 150 ? item.description.substring(0, 150) + '...' : item.description)}</p>` : ''}
+          </div>
+        `).join('')}
+      </div>`
+    : newsError
+      ? `<p class="error-text">Could not fetch news headlines: ${escapeHtml(newsError)}</p>`
+      : `<p class="note-placeholder"><em>Provide a NewsData.io API Key in the form above to fetch market headlines for ${ticker}.</em></p>`;
 
   results.innerHTML = `
     <div class="result-header">
@@ -464,12 +543,17 @@ function renderResults(ticker, priceData, note) {
       </div>
     </div>
 
+    <div class="news-section">
+      <h3>Latest News Headlines for ${ticker}</h3>
+      ${newsContentHtml}
+    </div>
+
     <div class="note-box">
       <h3>AI Research Note</h3>
       ${
         note
           ? `<div class="note-body">${formatMarkdownOrText(note)}</div>`
-          : `<p class="note-placeholder"><em>Provide an OpenRouter API Key in the form above to generate an automated AI Research Note analyzing OHLC, MACD, and RSI data.</em></p>`
+          : `<p class="note-placeholder"><em>Provide an OpenRouter API Key in the form above to generate an automated AI Research Note analyzing OHLC, MACD, RSI data, and headlines.</em></p>`
       }
     </div>
   `;
